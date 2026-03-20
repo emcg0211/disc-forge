@@ -1,0 +1,99 @@
+{
+  "name": "disc-forge",
+  "version": "1.2.0",
+  "description": "Professional Blu-ray Authoring Studio for macOS",
+  "main": "src/main.js",
+  "author": "Disc Forge",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "build": "electron-builder --mac --universal",
+    "build-arm": "electron-builder --mac --arm64",
+    "build-x64": "electron-builder --mac --x64",
+    "pack": "electron-builder --dir"
+  },
+  "devDependencies": {
+    "electron": "^28.3.3",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.discforge.studio",
+    "productName": "Disc Forge",
+    "copyright": "Copyright \u00a9 2026 ETHM",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "assets/",
+        "to": "assets/",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "bin/",
+        "to": "bin/",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.video",
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "entitlementsInherit": "assets/entitlements.mac.plist",
+      "icon": "assets/icon.icns",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "universal"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "universal"
+          ]
+        }
+      ]
+    },
+    "dmg": {
+      "title": "Disc Forge",
+      "background": "assets/dmg-background.png",
+      "window": {
+        "width": 540,
+        "height": 380
+      },
+      "contents": [
+        {
+          "x": 140,
+          "y": 185,
+          "type": "file"
+        },
+        {
+          "x": 400,
+          "y": 185,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ],
+      "iconSize": 110
+    },
+    "protocols": [
+      {
+        "name": "Disc Forge Project",
+        "schemes": [
+          "discforge"
+        ]
+      }
+    ],
+    "asar": false,
+    "afterPack": "scripts/afterPack.js"
+  }
+}
