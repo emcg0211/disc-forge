@@ -21,8 +21,19 @@ const AUDIO_FORMATS  = ['DTS-HD Master Audio','Dolby TrueHD','PCM 5.1','PCM 7.1'
 const SUBTITLE_FMTS  = ['SRT','ASS','SSA','SUB','VTT','PGS (Blu-ray Native)'];
 const VIDEO_FMTS     = ['H.264 AVC','H.265 HEVC','VC-1','MPEG-2'];
 const RESOLUTIONS    = ['1080p (1920×1080)','720p (1280×720)','480p (720×480)','480p (720×576) PAL','4K UHD (3840×2160)'];
-const MENU_THEMES    = ['Cinematic Dark','Elegant White','Retro Film','Minimal Type','Sci-Fi Grid','Organic Nature'];
+const MENU_THEMES    = ['Cinematic Dark','Elegant White','Retro Film','Minimal Type','Sci-Fi Grid','Organic Nature','Minimal','Cinema','Vintage','Neon','Grid','Sidebar'];
 const EXTRAS_TYPES   = ['Behind the Scenes','Deleted Scenes','Interviews','Trailers','Featurette','Short Film','Other'];
+
+const VIDEO_QUALITY_MODES = [
+  { id: 'passthrough', label: 'Passthrough',         crf: null, mult: 1.0  },
+  { id: 'crf18',       label: 'High Quality (CRF 18)', crf: 18,  mult: 0.75 },
+  { id: 'crf20',       label: 'Balanced (CRF 20)',     crf: 20,  mult: 0.55 },
+  { id: 'crf23',       label: 'Compact (CRF 23)',      crf: 23,  mult: 0.40 },
+];
+function videoQualityMult(q) {
+  const m = VIDEO_QUALITY_MODES.find(x => x.id === q);
+  return m ? m.mult : 1.0;
+}
 
 const TABS = [
   { id:'project',   icon:'🎬', label:'Project'    },
@@ -42,6 +53,9 @@ let state = {
   tools: { ffmpeg:{found:false}, ffprobe:{found:false}, tsmuxer:{found:false}, makemkv:{found:false} },
   building: false, buildSteps: [], buildCurrentStep: -1,
   buildDone: false, buildError: null, builtIsoPath: null, ffmpegLog: '',
+  buildEndTime: null, stepStartTimes: {}, stepDetails: {},
+  crfTotalSecs: 0,   // total duration of current CRF encode (for ETA)
+  probeCache: {},    // filePath → { duration, videoBitrate, audioStreams }
   project: {
     title: '', description: '', discLabel: '',
     resolution: RESOLUTIONS[0], videoFormat: VIDEO_FMTS[0], outputDir: '',
@@ -61,6 +75,25 @@ let state = {
       showEpisodeMenu: true, showAudioMenu: true, showSubtitleMenu: true, showButtonEmojis: true,
       episodeMenuStyle: 'list',  // 'list' or 'grid'
       logoImage: null,
+      // ── Feature 4: Enhanced menu customization ──────────────────────────────
+      // Gradient background
+      gradientEnabled: false, gradientColor1: '#080810', gradientColor2: '#1a1440', gradientDir: 'vertical',
+      // Background image effects
+      bgBlur: 0, bgBrightness: 100, bgContrast: 100,
+      // Font sizing
+      titleFontSize: 48, episodeFontSize: 13, fontWeight: 'bold', letterSpacing: 0,
+      // Text shadow
+      textShadow: false, textShadowColor: '#000000', textShadowBlur: 4,
+      textShadowOffsetX: 2, textShadowOffsetY: 2, textColorOpacity: 100,
+      // Button styling
+      btnBorderRadius: 4, btnBorderColor: '#dbb85a', btnBorderWidth: 1,
+      hoverEffect: 'highlight', // highlight, scale, underline, glow
+      episodeSpacing: 8, showEpisodeNumbers: true,
+      // Disc title overlay
+      discTitleOverlay: false, discTitleText: '', discTitleFontSize: 28,
+      discTitleColor: '#dbb85a', discTitlePosition: 'top-center',
+      // Animated background
+      animatedBg: false, animationType: 'pan', // pan, pulse, particles
     },
   },
   form: {
@@ -72,7 +105,9 @@ let state = {
   probeData: null,
   mkv: { file:null, probing:false, probeData:null, tracks:[], imported:false },
   embeddedTracks: [],   // auto-detected tracks from added video files
+  titleCompatibility: {}, // map of filePath → { compatible, mode, videoCodec, bitrateMbps, reasons }
   burning: false, burnStatus: null, burnMessage: '', burnDone: false, burnError: null,
+  burnDriveInfo: null, burnPercent: null,
   menuPreviewScreen: 'main',  // 'main', 'episodes', 'audio', 'subtitles', 'chapters'
   showWelcome: true,  // show onboarding on first launch
   showAbout: false,
@@ -120,9 +155,34 @@ async function boot() {
   }
   window.discForge.onBuildProgress(handleBuildProgress);
   window.discForge.onFFmpegProgress(line => {
-    state.ffmpegLog = line;
+    // CRF encode total-duration sentinel — don't display, just store
+    if (line.startsWith('__CRF_START:')) {
+      state.crfTotalSecs = parseFloat(line.slice(12)) || 0;
+      return;
+    }
+    // Parse FFmpeg CRF progress line (frame= fps= time= speed=)
+    const timeMatch  = line.match(/time=(\d{2}):(\d{2}):([\d.]+)/);
+    const speedMatch = line.match(/speed=\s*([\d.]+)x/);
+    const fpsMatch   = line.match(/fps=\s*([\d.]+)/);
+    const frameMatch = line.match(/frame=\s*(\d+)/);
+    if (state.crfTotalSecs > 0 && timeMatch) {
+      const currentSecs = parseInt(timeMatch[1]) * 3600 + parseInt(timeMatch[2]) * 60 + parseFloat(timeMatch[3]);
+      const speed = speedMatch ? parseFloat(speedMatch[1]) : 0;
+      const fps   = fpsMatch   ? parseFloat(fpsMatch[1])   : 0;
+      const frame = frameMatch ? parseInt(frameMatch[1])    : 0;
+      let etaStr = '';
+      if (speed > 0.01 && state.crfTotalSecs > currentSecs) {
+        const remSecs = Math.round((state.crfTotalSecs - currentSecs) / speed);
+        if (remSecs > 3) etaStr = ' — ~' + Math.floor(remSecs / 60) + 'm ' + (remSecs % 60) + 's left';
+      }
+      const pct = state.crfTotalSecs > 0 ? Math.min(100, (currentSecs / state.crfTotalSecs * 100)).toFixed(0) : 0;
+      state.ffmpegLog = `CRF encode ${pct}%` + (fps > 0 ? ` · ${fps.toFixed(0)} fps` : '') + (frame > 0 ? ` · frame ${frame}` : '') + etaStr;
+    } else {
+      if (!timeMatch) state.crfTotalSecs = 0;  // non-progress line resets CRF tracking
+      state.ffmpegLog = line;
+    }
     const el = document.getElementById('ffmpeg-log');
-    if (el) { el.textContent = line; }
+    if (el) { el.textContent = state.ffmpegLog; }
     appendLog(line);
   });
 
@@ -143,7 +203,10 @@ async function pickMainVideo() {
   if (!r) return;
   setPrj({ mainVideo:{ name: r.name, path: r.path, size: r.size } });
   const probe = await window.discForge.probeFile(r.path);
-  if (probe.success) setState({ probeData: probe.data });
+  if (probe.success) {
+    setState({ probeData: probe.data });
+    cacheProbeData(r.path, probe.data);
+  }
 }
 async function pickAudio() {
   const r = await pickFile([{ name:'Audio', extensions:['dts','ac3','eac3','wav','flac','aac','mka','truehd'] }]);
@@ -212,6 +275,7 @@ async function pickMkvFile() {
   setState({ mkv:{ file:{ name: p.name, path: p.path }, probing:true, probeData:null, tracks:[], imported:false } });
   const result = await window.discForge.probeFile(p.path);
   if (!result.success) { setState({ mkv:{ ...state.mkv, probing:false } }); return; }
+  cacheProbeData(p.path, result.data);
   setState({ mkv:{ ...state.mkv, probing:false, probeData:result.data, tracks:parseMkvTracks(result.data, p.path) } });
 }
 function parseMkvTracks(data, filePath) {
@@ -261,10 +325,59 @@ function importMkvTracks() {
 }
 function secToTc(sec) { const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=Math.floor(sec%60); return [h,m,s].map(v=>String(v).padStart(2,'0')).join(':'); }
 
+// ── Feature 2: Generate chapter thumbnails ────────────────────────────────────
+async function generateChapterThumbnails() {
+  const p = state.project;
+  const videoPath = p.mainVideo?.path || (p.titles && p.titles[0]?.file?.path);
+  if (!videoPath) { alert('Please add a video file first.'); return; }
+  if (p.chapters.length === 0) { alert('No chapters defined.'); return; }
+
+  const homeDir = await window.discForge.getHomeDir();
+  const thumbDir = homeDir + '/.discforge_thumbs';
+  let generated = 0;
+
+  for (const ch of p.chapters) {
+    try {
+      const outPath = `${thumbDir}/${ch.id}.jpg`;
+      const result = await window.discForge.generateChapterThumbnail(videoPath, ch.time, outPath);
+      if (result.success) {
+        const updated = state.project.chapters.map(c =>
+          c.id === ch.id ? { ...c, thumb: { path: result.path, name: `${ch.name}.jpg` } } : c
+        );
+        state.project = { ...state.project, chapters: updated };
+        generated++;
+        render();
+      }
+    } catch(_) {}
+  }
+  if (generated > 0) render();
+}
+
 // ── Build ──────────────────────────────────────────────────────────────────────
 async function startBuild() {
+  if (state.building) return;
   const p = state.project;
   if (!p.title || (!p.mainVideo && !(p.titles&&p.titles.length>0))) return;
+
+  // ── Disc capacity warning ──────────────────────────────────────────────────
+  const BD25_BYTES = 23.3e9;  // usable capacity
+  const BD50_BYTES = 46.6e9;
+  const allTitleFiles = [
+    ...(p.mainVideo ? [{ path: p.mainVideo.path, size: p.mainVideo.size || 0, quality: p.mainVideo.videoQuality }] : []),
+    ...(p.titles || []).map(t => ({ path: t.file?.path, size: t.file?.size || 0, quality: t.videoQuality })),
+  ];
+  let estBytes = 0;
+  for (const { path: fp, size, quality } of allTitleFiles) estBytes += estimateTitleBytes(fp, size, quality);
+  estBytes = Math.round(estBytes * 1.1);
+  const estGb = (estBytes / 1e9).toFixed(1);
+  if (estBytes > BD50_BYTES) {
+    const ok = confirm(`⚠ Estimated disc size (~${estGb} GB) exceeds BD-50 capacity (46.6 GB).\n\nConsider splitting into multiple discs. Continue anyway?`);
+    if (!ok) return;
+  } else if (estBytes > BD25_BYTES && (p.discSize === 'BD-25' || !p.discSize)) {
+    const ok = confirm(`⚠ Estimated disc size (~${estGb} GB) exceeds BD-25 capacity (23.3 GB).\n\nTip: Switch to BD-50 in the sidebar, or split into multiple discs. Continue anyway?`);
+    if (!ok) return;
+  }
+
   const additionalTitles = p.titles || [];
   const steps = [
     'Muxing main feature audio tracks', 'Validating mux output',
@@ -274,13 +387,21 @@ async function startBuild() {
     'Writing tsMuxeR project', 'Running tsMuxeR', 'Packaging ISO image',
   ];
   state.buildStartTime = Date.now();
+  state.buildEndTime = null;
+  state.stepStartTimes = {};
+  state.stepDetails = {};
   setState({ building:true, buildSteps:steps, buildCurrentStep:0, buildDone:false, buildError:null, builtIsoPath:null, ffmpegLog:'' });
   // Include enabled embedded tracks alongside manual tracks
   const includedEmbedded = (state.embeddedTracks||[]).filter(t => t.included !== false);
   const embeddedAudio = includedEmbedded.filter(t => t.role==='audio');
   const embeddedSubs  = includedEmbedded.filter(t => t.role==='subtitle');
+  // Passthrough mode: skip FFmpeg mux if main video is BD-compatible AND not CRF-encoding
+  const mainCompat = state.titleCompatibility?.[p.mainVideo?.path];
+  const mainHasCrf = p.mainVideo?.videoQuality && p.mainVideo.videoQuality !== 'passthrough';
   const buildProject = {
     ...p,
+    passThroughMode: mainCompat?.compatible === true && !p.forceTranscode && !mainHasCrf,
+    forceTranscode: p.forceTranscode || false,
     audioTracks: [
       ...(p.audioTracks||[]).filter(t => !t.excluded),
       ...embeddedAudio.map(t => ({ ...t, file: { path: t.sourceFile, name: t.sourceFileName }, embedded: true })),
@@ -302,17 +423,75 @@ function appendLog(msg) {
 }
 
 function handleBuildProgress(data) {
-  if (data.done) setState({ buildDone:true, builtIsoPath:data.isoPath, builtIsoSize:data.isoSize||0 });
-  else if (data.step!==undefined) setState({ buildCurrentStep:data.step });
+  if (data.done) {
+    state.buildEndTime = Date.now();
+    setState({ buildDone:true, builtIsoPath:data.isoPath, builtIsoSize:data.isoSize||0 });
+  } else if (data.step !== undefined) {
+    const stepIdx = data.step;
+    // Record start time for this step if not already set
+    if (!state.stepStartTimes[stepIdx]) {
+      state.stepStartTimes = { ...state.stepStartTimes, [stepIdx]: Date.now() };
+    }
+    // Store file-size detail for the previous step if provided
+    if (data.detail !== undefined) {
+      state.stepDetails = { ...state.stepDetails, [stepIdx]: data.detail };
+    }
+    setState({ buildCurrentStep: stepIdx });
+  }
 }
 function closeBuildModal() {
   window.discForge.removeAllListeners('build-progress');
   window.discForge.removeAllListeners('ffmpeg-progress');
   window.discForge.onBuildProgress(handleBuildProgress);
   window.discForge.onFFmpegProgress(line => { state.ffmpegLog=line; const el=document.getElementById('ffmpeg-log'); if(el) el.textContent=line; });
+  state.buildEndTime = null;
+  state.stepStartTimes = {};
+  state.stepDetails = {};
   setState({ building:false, buildDone:false, buildError:null });
 }
 function revealISO() { if (state.builtIsoPath) window.discForge.revealInFinder(state.builtIsoPath); }
+
+// ── Probe cache ────────────────────────────────────────────────────────────────
+function cacheProbeData(filePath, data) {
+  if (!data || !filePath) return;
+  const vs = data.streams?.find(s => s.codec_type === 'video');
+  const audioStreams = (data.streams || [])
+    .filter(s => s.codec_type === 'audio')
+    .map(s => ({ codec: s.codec_name || '', bitrate: parseInt(s.bit_rate || 0) }));
+  const duration = parseFloat(data.format?.duration || 0);
+  const videoBitrate = parseInt(vs?.bit_rate || data.format?.bit_rate || 0);
+  state.probeCache = { ...state.probeCache, [filePath]: { duration, videoBitrate, audioStreams } };
+}
+
+// Estimate output bytes for a single video file using probe data.
+// Video is stream-copied; FLAC/LPCM/TrueHD audio is transcoded to AC3 640kbps.
+const LOSSLESS_CODECS = ['flac','pcm_s24le','pcm_s16le','pcm_s32le','pcm_blu','truehd','mlp','dts-hd'];
+function estimateTitleBytes(filePath, fileSize, videoQuality) {
+  const mult = videoQualityMult(videoQuality);
+  const cached = state.probeCache?.[filePath];
+  if (!cached || !cached.duration) {
+    // No probe data — fall back to 60% of source file size, with quality multiplier
+    return (fileSize || 0) * 0.6 * mult;
+  }
+  const dur = cached.duration;
+  // Video: apply quality multiplier (CRF reduces video size)
+  const videoBytes = (cached.videoBitrate || 0) * dur / 8;
+  // Audio: lossless → AC3 640kbps; otherwise use actual bitrate (unchanged by CRF)
+  let audioBytes = 0;
+  const audioStreams = cached.audioStreams || [];
+  for (const as of audioStreams) {
+    const isLossless = LOSSLESS_CODECS.some(c => as.codec.toLowerCase().includes(c));
+    if (isLossless || !as.bitrate) {
+      audioBytes += 640000 * dur / 8;  // AC3 at 640kbps
+    } else {
+      audioBytes += as.bitrate * dur / 8;
+    }
+  }
+  if (audioStreams.length === 0) audioBytes = 640000 * dur / 8;
+  // Subtitles: 50MB flat per title (unchanged by CRF)
+  const subBytes = 50 * 1e6;
+  return videoBytes * mult + audioBytes + subBytes;
+}
 
 // ── Probe helper ───────────────────────────────────────────────────────────────
 function probeDisplay() {
@@ -381,7 +560,7 @@ function attachColorPickers() {
   });
 
   // Native color input
-  ['menu-primary','menu-accent','menu-stroke-color'].forEach(function(id) {
+  ['menu-primary','menu-accent','menu-stroke-color','menu-gradient-color1','menu-gradient-color2','menu-disc-title-color','menu-text-shadow-color'].forEach(function(id) {
     var cc = document.getElementById('cc-' + id);
     if (cc) cc.addEventListener('input', function(e) { applyColor(id, e.target.value); });
     var ch = document.getElementById('ch-' + id);
@@ -420,66 +599,126 @@ function applyColor(id, color) {
   if (id === 'menu-primary') setMenu({ primaryColor: color });
   else if (id === 'menu-accent') setMenu({ accentColor: color });
   else if (id === 'menu-stroke-color') setMenu({ textStrokeColor: color });
+  else if (id === 'menu-gradient-color1') setMenu({ gradientColor1: color });
+  else if (id === 'menu-gradient-color2') setMenu({ gradientColor2: color });
+  else if (id === 'menu-disc-title-color') setMenu({ discTitleColor: color });
+  else if (id === 'menu-text-shadow-color') setMenu({ textShadowColor: color });
 }
 
 // ── Menu preview HTML ──────────────────────────────────────────────────────────
 function menuPreviewHTML() {
   const m = state.project.menuConfig, p = state.project;
   const screen = state.menuPreviewScreen || 'main';
-  const bgMap = { 'Cinematic Dark':'#080810','Elegant White':'#f5f3ee','Retro Film':'#1a0e04','Minimal Type':'#f0eeea','Sci-Fi Grid':'#030a18','Organic Nature':'#0e1a0a' };
+  const bgMap = {
+    'Cinematic Dark':'#080810','Elegant White':'#f5f3ee','Retro Film':'#1a0e04',
+    'Minimal Type':'#f0eeea','Sci-Fi Grid':'#030a18','Organic Nature':'#0e1a0a',
+    'Minimal':'#ffffff','Cinema':'#0d0d0d','Vintage':'#c8b89a','Neon':'#0a0a0a',
+    'Grid':'#111122','Sidebar':'#0f0f1a',
+  };
   const bg = bgMap[m.theme]||'#080810';
-  const dark = parseInt(bg.slice(1,3),16)<100;
+  const dark = parseInt(bg.replace('#','').slice(0,2),16)<140;
   const text = dark ? '#f0eade' : '#1a1a2a';
   const font = "'" + m.fontStyle + "'," + m.fontStyle;
 
+  // Background style with gradient, image, blur/brightness/contrast support
   let bgStyle = 'background:' + bg;
+  let bgFilterStyle = '';
+  if (m.gradientEnabled && !m.backgroundImage) {
+    const dir = m.gradientDir === 'horizontal' ? '90deg' : m.gradientDir === 'diagonal' ? '135deg' : '180deg';
+    bgStyle = `background:linear-gradient(${dir},${m.gradientColor1||'#080810'},${m.gradientColor2||'#1a1440'})`;
+  }
   if (m.backgroundImage && m.backgroundImage.path) {
     bgStyle = "background:url('file://" + m.backgroundImage.path + "') center/cover no-repeat";
+    const blur = m.bgBlur || 0;
+    const brightness = (m.bgBrightness || 100) / 100;
+    const contrast = (m.bgContrast || 100) / 100;
+    if (blur || brightness !== 1 || contrast !== 1) {
+      bgFilterStyle = `filter:blur(${blur}px) brightness(${brightness}) contrast(${contrast});`;
+    }
   }
-  const opacity = (m.overlayOpacity !== undefined ? m.overlayOpacity : 50) / 100;
-  const overlay = (m.backgroundImage || m.backgroundVideo) ? 'rgba(0,0,0,' + opacity + ')' : 'transparent';
 
+  // Theme-specific accent for Neon and Cinema themes
+  const themeAccent = m.theme === 'Neon' ? (m.primaryColor || '#00ffcc')
+    : m.theme === 'Cinema' ? (m.primaryColor || '#d4af37')
+    : m.theme === 'Vintage' ? (m.primaryColor || '#8b6914')
+    : m.primaryColor;
+
+  const opacity = (m.overlayOpacity !== undefined ? m.overlayOpacity : 50) / 100;
+  const overlay = (m.backgroundImage || m.backgroundVideo || m.gradientEnabled) ? 'rgba(0,0,0,' + opacity + ')' : 'transparent';
+
+  // Title font size from slider (px) or legacy size key
   const titleSizeMap = { small:'18px', medium:'26px', large:'36px', xlarge:'52px' };
-  const titleSize = titleSizeMap[m.titleSize||'large'] || '36px';
+  const titleFontPx = m.titleFontSize ? m.titleFontSize + 'px' : (titleSizeMap[m.titleSize||'large'] || '36px');
+  const episodeFontPx = (m.episodeFontSize || 13) + 'px';
+  const fontWeight = m.fontWeight || 'bold';
+  const letterSpacing = (m.letterSpacing || 0) + 'px';
+
   const titleAlign = m.titleAlign || 'center';
   const btnStyle = m.buttonStyle || 'outline';
   const btnLayout = m.buttonLayout || 'horizontal';
   const emojis = m.showButtonEmojis !== false;
+
+  // Text stroke
   const sw = m.textStrokeWidth || 2;
   const sc = m.textStrokeColor || '#000000';
   const strokeStyle = m.textStroke
     ? ('-webkit-text-stroke:' + sw + 'px ' + sc + ';text-shadow:' + sw + 'px 0 0 ' + sc + ',-' + sw + 'px 0 0 ' + sc + ',0 ' + sw + 'px 0 ' + sc + ',0 -' + sw + 'px 0 ' + sc + ';')
     : '';
 
+  // Text shadow
+  const tsStyle = m.textShadow && !m.textStroke
+    ? `text-shadow:${m.textShadowOffsetX||2}px ${m.textShadowOffsetY||2}px ${m.textShadowBlur||4}px ${m.textShadowColor||'#000000'};`
+    : '';
+
+  // Button CSS using new custom border/radius settings
+  const btnBR = m.btnBorderRadius != null ? m.btnBorderRadius : 4;
+  const btnBC = m.btnBorderColor || m.accentColor;
+  const btnBW = m.btnBorderWidth != null ? m.btnBorderWidth : 1;
+
   function getBtnCSS(accent, textCol, active) {
     var base = '';
-    if (btnStyle === 'filled')    base = 'background:' + accent + ';color:#fff;border:none;padding:10px 24px;border-radius:4px';
-    else if (btnStyle === 'minimal')   base = 'background:none;color:' + textCol + ';border:none;padding:8px 16px;letter-spacing:.15em';
-    else if (btnStyle === 'pill')      base = 'background:' + accent + '22;color:' + textCol + ';border:1px solid ' + accent + ';padding:10px 28px;border-radius:999px';
-    else if (btnStyle === 'underline') base = 'background:none;color:' + textCol + ';border:none;border-bottom:2px solid ' + accent + ';padding:6px 12px;border-radius:0';
-    else base = 'background:' + accent + '18;color:' + textCol + ';border:1px solid ' + accent + '66;padding:10px 24px;border-radius:4px';
+    if (btnStyle === 'filled')    base = `background:${accent};color:#fff;border:none;padding:10px 24px;border-radius:${btnBR}px`;
+    else if (btnStyle === 'minimal')   base = `background:none;color:${textCol};border:none;padding:8px 16px;letter-spacing:.15em`;
+    else if (btnStyle === 'pill')      base = `background:${accent}22;color:${textCol};border:${btnBW}px solid ${accent};padding:10px 28px;border-radius:999px`;
+    else if (btnStyle === 'underline') base = `background:none;color:${textCol};border:none;border-bottom:2px solid ${accent};padding:6px 12px;border-radius:0`;
+    else base = `background:${accent}18;color:${textCol};border:${btnBW}px solid ${btnBC}66;padding:10px 24px;border-radius:${btnBR}px`;
     if (active) base += ';box-shadow:0 0 0 2px ' + accent + ';filter:brightness(1.2)';
     return base + ';font-family:' + font + ';font-size:12px;letter-spacing:.08em;cursor:pointer;transition:all 0.15s';
   }
+
+  // Neon glow for Neon theme buttons
+  var neonGlow = m.theme === 'Neon' ? `;box-shadow:0 0 8px ${themeAccent}88` : '';
 
   var allTitles = [p.mainVideo, ...(p.titles||[]).map(function(t){return t.file;})].filter(Boolean);
   var hasEpisodes = allTitles.length > 1 && m.showEpisodeMenu !== false;
   var audioTracks = [...(p.audioTracks||[]), ...(state.embeddedTracks||[]).filter(function(t){return t.role==='audio';})];
   var subTracks = [...(p.subtitleTracks||[]), ...(state.embeddedTracks||[]).filter(function(t){return t.role==='subtitle';})];
 
+  // Episode item spacing
+  var epSpacing = m.episodeSpacing != null ? m.episodeSpacing : 8;
+
   // Screen nav buttons (back arrow)
-  var backBtn = '<div id="menu-sim-back" style="position:absolute;top:12px;left:12px;cursor:pointer;color:' + m.primaryColor + ';font-size:11px;z-index:10;padding:4px 8px;border:1px solid ' + m.primaryColor + '44;border-radius:4px;font-family:' + font + '">← BACK</div>';
+  var backBtn = '<div id="menu-sim-back" style="position:absolute;top:12px;left:12px;cursor:pointer;color:' + (themeAccent||m.primaryColor) + ';font-size:11px;z-index:10;padding:4px 8px;border:1px solid ' + (themeAccent||m.primaryColor) + '44;border-radius:4px;font-family:' + font + '">← BACK</div>';
 
   var content = '';
 
   if (screen === 'episodes') {
+    var showNums = m.showEpisodeNumbers !== false;
     content = backBtn +
       '<div style="width:100%;padding:8px 16px">' +
-      '<div style="font-size:11px;color:' + m.primaryColor + ';letter-spacing:.12em;font-family:' + font + ';margin-bottom:12px;border-bottom:1px solid ' + m.primaryColor + '44;padding-bottom:8px">EPISODES</div>' +
+      '<div style="font-size:11px;color:' + (themeAccent||m.primaryColor) + ';letter-spacing:.12em;font-family:' + font + ';margin-bottom:12px;border-bottom:1px solid ' + (themeAccent||m.primaryColor) + '44;padding-bottom:8px">EPISODES</div>' +
       allTitles.map(function(ep, i) {
         var name = ep ? (ep.name||'').replace(/\.[^.]+$/, '') || ('Episode ' + (i+1)) : ('Episode ' + (i+1));
-        return '<div id="menu-ep-' + i + '" style="display:flex;align-items:center;gap:10px;padding:8px 4px;border-bottom:1px solid rgba(255,255,255,0.07);cursor:pointer;' + (i===0?'color:'+m.primaryColor+';':('color:'+text+';')) + 'font-family:' + font + ';font-size:11px" data-menu-action="ep-' + i + '">' +
-          '<span style="color:' + m.primaryColor + ';width:20px;text-align:center;font-size:10px">' + (i===0?'▶':'') + (i+1) + '</span>' +
+        var thumbHtml = '';
+        // Show episode thumbnail if available (Grid layout)
+        if (m.episodeMenuStyle === 'grid') {
+          var epTitle = p.titles?.[i-1];
+          // No thumbnails in preview
+          thumbHtml = '<div style="width:50px;height:28px;background:rgba(255,255,255,0.1);border-radius:3px;flex-shrink:0"></div>';
+        }
+        return '<div id="menu-ep-' + i + '" style="display:flex;align-items:center;gap:10px;padding:' + epSpacing + 'px 4px;border-bottom:1px solid rgba(255,255,255,0.07);cursor:pointer;' + (i===0?'color:'+(themeAccent||m.primaryColor)+';':('color:'+text+';')) + 'font-family:' + font + ';font-size:' + episodeFontPx + '" data-menu-action="ep-' + i + '">' +
+          thumbHtml +
+          (showNums ? '<span style="color:' + (themeAccent||m.primaryColor) + ';width:20px;text-align:center;font-size:10px">' + (i===0?'▶':'') + (i+1) + '</span>' : '') +
           '<span>' + name.slice(0, 30) + '</span>' +
         '</div>';
       }).join('') +
@@ -487,10 +726,10 @@ function menuPreviewHTML() {
   } else if (screen === 'audio') {
     content = backBtn +
       '<div style="width:100%;padding:8px 16px">' +
-      '<div style="font-size:11px;color:' + m.primaryColor + ';letter-spacing:.12em;font-family:' + font + ';margin-bottom:12px;border-bottom:1px solid ' + m.primaryColor + '44;padding-bottom:8px">AUDIO</div>' +
+      '<div style="font-size:11px;color:' + (themeAccent||m.primaryColor) + ';letter-spacing:.12em;font-family:' + font + ';margin-bottom:12px;border-bottom:1px solid ' + (themeAccent||m.primaryColor) + '44;padding-bottom:8px">AUDIO</div>' +
       (audioTracks.length > 0 ? audioTracks.map(function(t, i) {
-        return '<div style="display:flex;align-items:center;gap:10px;padding:8px 4px;border-bottom:1px solid rgba(255,255,255,0.07);cursor:pointer;' + (i===0?'color:'+m.primaryColor+';':('color:'+text+';')) + 'font-family:' + font + ';font-size:11px">' +
-          '<span style="color:' + m.primaryColor + ';width:20px;font-size:10px">' + (i===0?'●':'○') + '</span>' +
+        return '<div style="display:flex;align-items:center;gap:10px;padding:' + epSpacing + 'px 4px;border-bottom:1px solid rgba(255,255,255,0.07);cursor:pointer;' + (i===0?'color:'+(themeAccent||m.primaryColor)+';':('color:'+text+';')) + 'font-family:' + font + ';font-size:' + episodeFontPx + '">' +
+          '<span style="color:' + (themeAccent||m.primaryColor) + ';width:20px;font-size:10px">' + (i===0?'●':'○') + '</span>' +
           '<span>' + (t.label||t.language||'Track '+(i+1)) + '</span>' +
           '<span style="margin-left:auto;font-size:10px;opacity:0.6">' + (t.format||'') + '</span>' +
         '</div>';
@@ -499,12 +738,12 @@ function menuPreviewHTML() {
   } else if (screen === 'subtitles') {
     content = backBtn +
       '<div style="width:100%;padding:8px 16px">' +
-      '<div style="font-size:11px;color:' + m.primaryColor + ';letter-spacing:.12em;font-family:' + font + ';margin-bottom:12px;border-bottom:1px solid ' + m.primaryColor + '44;padding-bottom:8px">SUBTITLES</div>' +
-      '<div style="display:flex;align-items:center;gap:10px;padding:8px 4px;border-bottom:1px solid rgba(255,255,255,0.07);color:' + m.primaryColor + ';font-family:' + font + ';font-size:11px">' +
-        '<span style="color:' + m.primaryColor + ';width:20px;font-size:10px">●</span><span>Off</span>' +
+      '<div style="font-size:11px;color:' + (themeAccent||m.primaryColor) + ';letter-spacing:.12em;font-family:' + font + ';margin-bottom:12px;border-bottom:1px solid ' + (themeAccent||m.primaryColor) + '44;padding-bottom:8px">SUBTITLES</div>' +
+      '<div style="display:flex;align-items:center;gap:10px;padding:' + epSpacing + 'px 4px;border-bottom:1px solid rgba(255,255,255,0.07);color:' + (themeAccent||m.primaryColor) + ';font-family:' + font + ';font-size:' + episodeFontPx + '">' +
+        '<span style="color:' + (themeAccent||m.primaryColor) + ';width:20px;font-size:10px">●</span><span>Off</span>' +
       '</div>' +
       (subTracks.length > 0 ? subTracks.map(function(t, i) {
-        return '<div style="display:flex;align-items:center;gap:10px;padding:8px 4px;border-bottom:1px solid rgba(255,255,255,0.07);color:' + text + ';font-family:' + font + ';font-size:11px">' +
+        return '<div style="display:flex;align-items:center;gap:10px;padding:' + epSpacing + 'px 4px;border-bottom:1px solid rgba(255,255,255,0.07);color:' + text + ';font-family:' + font + ';font-size:' + episodeFontPx + '">' +
           '<span style="width:20px;font-size:10px;color:' + text + '44">○</span>' +
           '<span>' + (t.description||t.language||'Track '+(i+1)) + '</span>' +
           (t.isForced ? '<span style="font-size:9px;opacity:0.6;margin-left:4px">Forced</span>' : '') +
@@ -515,10 +754,12 @@ function menuPreviewHTML() {
   } else if (screen === 'chapters') {
     content = backBtn +
       '<div style="width:100%;padding:8px 16px">' +
-      '<div style="font-size:11px;color:' + m.primaryColor + ';letter-spacing:.12em;font-family:' + font + ';margin-bottom:12px;border-bottom:1px solid ' + m.primaryColor + '44;padding-bottom:8px">CHAPTERS</div>' +
+      '<div style="font-size:11px;color:' + (themeAccent||m.primaryColor) + ';letter-spacing:.12em;font-family:' + font + ';margin-bottom:12px;border-bottom:1px solid ' + (themeAccent||m.primaryColor) + '44;padding-bottom:8px">CHAPTERS</div>' +
       (p.chapters.length > 0 ? p.chapters.map(function(ch, i) {
-        return '<div style="display:flex;align-items:center;gap:10px;padding:7px 4px;border-bottom:1px solid rgba(255,255,255,0.07);' + (i===0?'color:'+m.primaryColor+';':('color:'+text+';')) + 'font-family:' + font + ';font-size:11px;cursor:pointer">' +
-          '<span style="color:' + m.primaryColor + ';width:20px;font-size:10px">' + (i+1) + '</span>' +
+        var thumbHtml = ch.thumb?.path ? `<img src="file://${ch.thumb.path}" style="width:48px;height:27px;object-fit:cover;border-radius:3px;flex-shrink:0" />` : '';
+        return '<div style="display:flex;align-items:center;gap:8px;padding:' + epSpacing + 'px 4px;border-bottom:1px solid rgba(255,255,255,0.07);' + (i===0?'color:'+(themeAccent||m.primaryColor)+';':('color:'+text+';')) + 'font-family:' + font + ';font-size:' + episodeFontPx + ';cursor:pointer">' +
+          thumbHtml +
+          '<span style="color:' + (themeAccent||m.primaryColor) + ';width:20px;font-size:10px">' + (i+1) + '</span>' +
           '<span>' + esc(ch.name) + '</span>' +
           '<span style="margin-left:auto;font-size:10px;opacity:0.6;font-family:var(--font-mono)">' + ch.time + '</span>' +
         '</div>';
@@ -539,20 +780,43 @@ function menuPreviewHTML() {
     ];
 
     var btnFlexDir = btnLayout === 'vertical' ? 'column' : 'row';
-    var btnAlign = btnLayout === 'vertical' ? 'center' : 'center';
+    var btnAlign = 'center';
 
-    content = (m.showTitle!==false ? '<div style="color:' + m.primaryColor + ';font-family:' + font + ';font-size:' + titleSize + ';font-weight:700;text-align:' + titleAlign + ';letter-spacing:.05em;text-transform:uppercase;' + strokeStyle + 'margin-bottom:8px">' + esc(m.title||p.title||'DISC TITLE') + '</div>' : '') +
-      (m.subtitle ? '<div style="color:' + text + 'aa;font-family:' + font + ';font-size:13px;text-align:' + titleAlign + ';letter-spacing:.08em;margin-bottom:12px">' + esc(m.subtitle) + '</div>' : '') +
+    // Combined text decorations
+    var titleDecor = strokeStyle + tsStyle + `font-weight:${fontWeight};letter-spacing:${letterSpacing};`;
+
+    content =
+      (m.showTitle!==false ? '<div style="color:' + (themeAccent||m.primaryColor) + ';font-family:' + font + ';font-size:' + titleFontPx + ';text-align:' + titleAlign + ';letter-spacing:.05em;text-transform:uppercase;' + titleDecor + 'margin-bottom:8px">' + esc(m.title||p.title||'DISC TITLE') + '</div>' : '') +
+      (m.subtitle ? '<div style="color:' + text + 'aa;font-family:' + font + ';font-size:' + episodeFontPx + ';text-align:' + titleAlign + ';letter-spacing:.08em;margin-bottom:12px">' + esc(m.subtitle) + '</div>' : '') +
       '<div style="display:flex;flex-direction:' + btnFlexDir + ';flex-wrap:wrap;gap:8px;justify-content:' + btnAlign + ';align-items:center">' +
       menuBtns.map(function(btn) {
-        return '<div data-menu-action="' + btn.action + '" style="' + getBtnCSS(m.accentColor, text, false) + '">' + btn.label + '</div>';
+        return '<div data-menu-action="' + btn.action + '" style="' + getBtnCSS(themeAccent||m.accentColor, text, false) + neonGlow + '">' + btn.label + '</div>';
       }).join('') +
       '</div>';
   }
 
+  // Disc title overlay
+  var discTitleHtml = '';
+  if (m.discTitleOverlay && m.discTitleText) {
+    var dtPos = m.discTitlePosition || 'top-center';
+    var dtPosStyle = dtPos === 'top-left' ? 'top:14px;left:14px;transform:none' :
+      dtPos === 'top-right' ? 'top:14px;right:14px;transform:none' :
+      'top:14px;left:50%;transform:translateX(-50%)';
+    discTitleHtml = '<div style="position:absolute;' + dtPosStyle + ';font-family:' + font + ';font-size:' + (m.discTitleFontSize||28) + 'px;font-weight:bold;color:' + (m.discTitleColor||'#dbb85a') + ';letter-spacing:.08em;z-index:3;white-space:nowrap">' + esc(m.discTitleText) + '</div>';
+  }
+
+  // Animated background CSS
+  var animStyle = '';
+  if (m.animatedBg) {
+    if (m.animationType === 'pan') animStyle = 'animation:menu-pan 8s linear infinite alternate;background-size:120% 120%!important';
+    else if (m.animationType === 'pulse') animStyle = 'animation:menu-pulse 3s ease-in-out infinite';
+  }
+  var animCSS = m.animatedBg ? '<style>@keyframes menu-pan{from{background-position:0% 0%}to{background-position:100% 100%}}@keyframes menu-pulse{0%,100%{opacity:1}50%{opacity:0.7}}</style>' : '';
+
   var screenLabel = { main:'Main Menu', episodes:'Episode Selection', audio:'Audio Selection', subtitles:'Subtitle Selection', chapters:'Chapter Selection' }[screen] || 'Main Menu';
 
   return '<div class="menu-preview-wrap">' +
+    animCSS +
     '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
     '<div style="font-size:11px;color:var(--text-tertiary)">📺 ' + screenLabel + '</div>' +
     '<div style="display:flex;gap:4px">' +
@@ -560,9 +824,10 @@ function menuPreviewHTML() {
       return '<div id="menu-nav-' + s + '" style="font-size:9px;padding:2px 8px;border-radius:4px;cursor:pointer;border:1px solid ' + (screen===s?'var(--gold)':'var(--border-dim)') + ';color:' + (screen===s?'var(--gold)':'var(--text-tertiary)') + ';background:' + (screen===s?'rgba(219,184,90,0.1)':'transparent') + '">' + s + '</div>';
     }).join('') +
     '</div></div>' +
-    '<div class="menu-preview-inner" style="' + bgStyle + ';cursor:default">' +
+    '<div class="menu-preview-inner" style="' + bgStyle + ';' + animStyle + ';' + bgFilterStyle + 'cursor:default;overflow:hidden">' +
     '<div style="position:absolute;inset:0;background:' + overlay + ';border-radius:inherit"></div>' +
-    (m.theme==='Sci-Fi Grid' ? '<div class="menu-preview-grid-overlay"></div>' : '') +
+    (m.theme==='Sci-Fi Grid' || m.theme==='Grid' ? '<div class="menu-preview-grid-overlay"></div>' : '') +
+    discTitleHtml +
     (m.logoImage && m.logoImage.path ? '<img src="file://' + m.logoImage.path + '" style="position:absolute;bottom:16px;left:16px;max-height:40px;opacity:0.8;z-index:2" />' : '') +
     '<div style="position:relative;z-index:1;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:12px;padding:20px;text-align:center">' +
     content +
@@ -623,7 +888,7 @@ function titlebarHTML(tools) {
     <div class="titlebar-brand">
       <div class="titlebar-logo">💿</div>
       <span class="titlebar-name">Disc Forge</span>
-      <span class="titlebar-version">1.2</span>
+      <span class="titlebar-version">1.5.2</span>
     </div>
     <div class="titlebar-spacer"></div>
     <div class="titlebar-tools">
@@ -648,24 +913,34 @@ function discMeterHTML(p) {
     { label: 'BD-100', gb: 100,  bytes: 100e9  },
   ];
 
-  // If we have a built ISO, use its actual size for accuracy
-  // Otherwise estimate from source files with a 0.6 compression factor
-  // (source MKVs are typically 40-60% larger than the muxed output)
+  // If we have a built ISO, use its actual size for accuracy.
+  // Otherwise estimate per-title using probe data: video bitrate × duration,
+  // plus AC3 audio estimate for lossless tracks, plus 50MB subtitle overhead,
+  // then add 10% BD structure overhead.
   let usedBytes = 0;
   let usingActual = false;
+  let usingProbe = false;
 
   if (state.builtIsoPath && state.builtIsoSize) {
     usedBytes = state.builtIsoSize;
     usingActual = true;
   } else {
+    const allTitleFiles = [
+      ...(p.mainVideo ? [{ path: p.mainVideo.path, size: p.mainVideo.size || 0, quality: p.mainVideo.videoQuality }] : []),
+      ...(p.titles || []).map(t => ({ path: t.file?.path, size: t.file?.size || 0, quality: t.videoQuality })),
+    ];
     let rawBytes = 0;
-    if (p.mainVideo?.size) rawBytes += p.mainVideo.size;
-    (p.titles||[]).forEach(t => { if (t.file?.size) rawBytes += t.file.size; });
-    (p.audioTracks||[]).forEach(t => { if (t.file?.size) rawBytes += t.file.size; });
-    (p.subtitleTracks||[]).forEach(t => { if (t.file?.size) rawBytes += t.file.size; });
-    (p.extras||[]).forEach(t => { if (t.file?.size) rawBytes += t.file.size; });
-    // Apply compression estimate — muxed output is typically ~60% of source size
-    usedBytes = Math.round(rawBytes * 0.6);
+    let probeHits = 0;
+    for (const { path: fp, size, quality } of allTitleFiles) {
+      const est = estimateTitleBytes(fp, size, quality);
+      rawBytes += est;
+      if (fp && state.probeCache?.[fp]) probeHits++;
+    }
+    // Extras use raw file size (already in output format)
+    (p.extras||[]).forEach(t => { if (t.file?.size) rawBytes += t.file.size * 0.6; });
+    // Add 10% BD structure/multiplexing overhead
+    usedBytes = Math.round(rawBytes * 1.1);
+    usingProbe = probeHits > 0;
   }
 
   const selectedDisc = p.discSize || 'BD-25';
@@ -676,7 +951,7 @@ function discMeterHTML(p) {
   const freeGb = Math.max(0, (currentDisc.bytes - usedBytes) / 1e9).toFixed(2);
   const barColor = pct > 90 ? '#e74c3c' : pct > 75 ? '#e67e22' : 'var(--gold)';
   const overFill = usedBytes > currentDisc.bytes;
-  const label = usingActual ? usedGb + ' GB (actual ISO)' : '~' + usedGb + ' GB (estimated)';
+  const label = usingActual ? usedGb + ' GB (actual ISO)' : (usingProbe ? '~' + usedGb + ' GB (probe estimate)' : '~' + usedGb + ' GB (rough estimate)');
 
   return `
     <div style="margin-bottom:8px;display:flex;justify-content:space-between;align-items:center">
@@ -692,7 +967,9 @@ function discMeterHTML(p) {
       <span style="color:${overFill?'#e74c3c':'inherit'}">${pct.toFixed(0)}% full${overFill?' ⚠ Over capacity!':''}</span>
       <span>Space remaining: ${freeGb} GB</span>
     </div>
-    ${usingActual ? '' : '<div style="font-size:9px;color:var(--text-tertiary);margin-top:4px;opacity:0.7">Estimate based on source files — actual output is usually smaller</div>'}
+    ${usingActual ? '' : usingProbe
+      ? '<div style="font-size:9px;color:var(--text-tertiary);margin-top:4px;opacity:0.7">Estimate: video bitrate + AC3 audio + subtitles + 10% overhead</div>'
+      : '<div style="font-size:9px;color:var(--text-tertiary);margin-top:4px;opacity:0.7">Rough estimate — add videos to get a more accurate size</div>'}
   `;
 }
 
@@ -836,7 +1113,21 @@ function pageProject(p) {
               <div class="empty-state-icon">🎬</div>
               <div class="empty-state-text">No videos added yet — click + Add Videos to get started</div>
             </div>`;
-          return `<div class="track-list">${allTitles.map((t, i) => `
+          return `<div class="track-list">${allTitles.map((t, i) => {
+            const compat = state.titleCompatibility?.[t.file?.path];
+            const compatBadge = compat
+              ? (compat.compatible
+                ? `<span class="badge badge-green" title="BD-compatible — passthrough mode">⚡ Passthrough</span>`
+                : `<span class="badge badge-orange" title="${esc(compat.reasons?.join(', ') || 'Needs transcoding')}">🔄 Transcode</span>`)
+              : '';
+            const tQuality = t.videoQuality || 'passthrough';
+            const qMode = VIDEO_QUALITY_MODES.find(m => m.id === tQuality) || VIDEO_QUALITY_MODES[0];
+            const qualityBadge = tQuality === 'passthrough'
+              ? `<span class="badge badge-green" title="Video quality: stream copy, original quality">Copy</span>`
+              : `<span class="badge badge-yellow" title="Video quality: CRF ${qMode.crf} re-encode — ${qMode.label}">CRF ${qMode.crf}</span>`;
+            const estBytes = estimateTitleBytes(t.file?.path, t.file?.size || 0, tQuality);
+            const estGb = estBytes > 0 ? (estBytes / 1e9).toFixed(2) + ' GB' : '';
+            return `
             <div class="track-card" style="flex-direction:column;align-items:stretch;gap:8px">
               <div style="display:flex;align-items:center;gap:10px">
                 <span class="track-num">${i + 1}</span>
@@ -846,6 +1137,8 @@ function pageProject(p) {
                 </div>
                 <div class="track-actions">
                   ${i === 0 && p.mainVideo ? '<span class="badge badge-gold">Main</span>' : ''}
+                  ${compatBadge}
+                  ${qualityBadge}
                   <button class="btn btn-danger" data-rm-title="${t.id}">✕</button>
                 </div>
               </div>
@@ -853,7 +1146,33 @@ function pageProject(p) {
                 <label style="font-size:11px;color:var(--text-tertiary);white-space:nowrap">Menu name:</label>
                 <input type="text" class="title-label-input" id="tl-${t.id}" data-title-id="${t.id}" value="${esc(t.label || t.file.name.replace(/\.[^.]+$/, ''))}" placeholder="Episode name shown in menu" style="flex:1;font-size:12px;padding:4px 8px" />
               </div>
-            </div>`).join('')}</div>`;
+              <div style="display:flex;align-items:center;gap:8px;padding-left:60px">
+                <label style="font-size:11px;color:var(--text-tertiary);white-space:nowrap">Video quality:</label>
+                <select class="title-quality-select" data-title-id="${t.id}" style="font-size:11px;padding:3px 6px">
+                  ${VIDEO_QUALITY_MODES.map(m => `<option value="${m.id}" ${tQuality === m.id ? 'selected' : ''}>${m.label}</option>`).join('')}
+                </select>
+                ${estGb ? `<span style="font-size:10px;color:var(--text-tertiary)">~${estGb}</span>` : ''}
+              </div>
+            </div>`;
+          }).join('')}</div>
+          <div style="margin-top:10px;display:flex;align-items:center;gap:8px">
+            <label style="font-size:11px;color:var(--text-tertiary);white-space:nowrap">Apply to all:</label>
+            <select id="quality-apply-select" style="font-size:11px;padding:3px 6px">
+              ${VIDEO_QUALITY_MODES.map(m => `<option value="${m.id}">${m.label}</option>`).join('')}
+            </select>
+            <button class="btn btn-ghost btn-sm" id="quality-apply-all">Apply</button>
+          </div>
+          ${(() => {
+            const mainCompat = state.titleCompatibility?.[p.mainVideo?.path];
+            if (!mainCompat) return '';
+            return `<div style="margin-top:8px;display:flex;align-items:center;gap:10px">
+              <label class="check-label" style="font-size:12px">
+                <input type="checkbox" id="force-transcode" ${p.forceTranscode?'checked':''} />
+                Force re-encode (override passthrough)
+              </label>
+              ${mainCompat.compatible ? `<span style="font-size:11px;color:var(--text-tertiary)">Estimated: fast (passthrough)</span>` : `<span style="font-size:11px;color:var(--text-tertiary)">Estimated: slower (transcoding)</span>`}
+            </div>`;
+          })()}`;
         })()}
         ${probeDisplay()}
         <div style="margin-top:12px">
@@ -867,6 +1186,16 @@ function pageProject(p) {
             </ul>
           </div>
         </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <div class="card-header">
+        <div class="card-icon">💾</div>
+        <div><div class="card-title">Disc Capacity</div><div class="card-subtitle">Estimated output size — updates as you add content</div></div>
+      </div>
+      <div class="card-body" style="padding-bottom:12px">
+        ${discMeterHTML(p)}
       </div>
     </div>
 
@@ -1191,8 +1520,9 @@ function pageChapters(p, f) {
         <div class="page-title">Chapters</div>
         <div class="page-subtitle">Define navigation markers — embedded as FFMETADATA in the stream</div>
       </div>
-      <div style="display:flex;gap:8px;align-items:center">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <button class="btn btn-ghost btn-sm" id="import-chapters-btn">📥 Import from Video</button>
+        ${p.chapters.length > 0 ? '<button class="btn btn-ghost btn-sm" id="gen-thumbs-btn">🖼 Generate Thumbnails</button>' : ''}
         ${p.chapters.length > 0 ? '<button class="btn btn-ghost btn-sm" id="clear-chapters-btn" style="color:#e05050">🗑 Clear All</button>' : ''}
       </div>
     </div>
@@ -1217,11 +1547,12 @@ function pageChapters(p, f) {
       : `<div class="track-list">${p.chapters.map((c,i)=>`
           <div class="track-card">
             <span class="track-num">${i+1}</span>
-            <div class="track-icon-wrap">≡</div>
+            ${c.thumb && c.thumb.path
+              ? `<img src="file://${c.thumb.path}" style="width:80px;height:45px;object-fit:cover;border-radius:4px;flex-shrink:0;border:1px solid var(--border-dim)" />`
+              : `<div class="track-icon-wrap">≡</div>`}
             <div class="track-body"><div class="track-name">${esc(c.name)}</div></div>
             <div class="track-actions">
               <code style="font-family:var(--font-mono);font-size:12px;color:var(--gold);background:rgba(219,184,90,0.1);padding:3px 8px;border-radius:5px;border:1px solid rgba(219,184,90,0.2)">${c.time}</code>
-              ${c.thumb?'<span class="badge badge-green">🖼 Thumb</span>':''}
               <button class="btn btn-danger" data-rm-chapter="${c.id}">✕</button>
             </div>
           </div>`).join('')}</div>`}`;
@@ -1375,6 +1706,149 @@ function pageMenu(p) {
         </div>
       </div>
     </div>
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-header"><div class="card-icon">🔤</div><div><div class="card-title">Font Sizing & Spacing</div></div></div>
+      <div class="card-body">
+        <div style="margin-bottom:14px">
+          <label class="field-label" style="margin-bottom:8px;display:block">Title Font Size: ${m.titleFontSize||48}px</label>
+          <input type="range" id="menu-title-font-size" min="24" max="96" value="${m.titleFontSize||48}" style="width:100%;accent-color:var(--gold)" />
+        </div>
+        <div style="margin-bottom:14px">
+          <label class="field-label" style="margin-bottom:8px;display:block">Episode/Button Font Size: ${m.episodeFontSize||13}px</label>
+          <input type="range" id="menu-episode-font-size" min="10" max="36" value="${m.episodeFontSize||13}" style="width:100%;accent-color:var(--gold)" />
+        </div>
+        <div class="grid-2" style="margin-bottom:14px">
+          <div class="field"><label class="field-label">Font Weight</label>
+            <select id="menu-font-weight">
+              ${['normal','bold','lighter','100','200','300','400','500','600','700','800','900'].map(w=>`<option ${(m.fontWeight||'bold')===w?'selected':''}>${w}</option>`).join('')}
+            </select></div>
+          <div class="field"><label class="field-label">Letter Spacing: ${m.letterSpacing||0}px</label>
+            <input type="range" id="menu-letter-spacing" min="-2" max="10" value="${m.letterSpacing||0}" style="width:100%;accent-color:var(--gold)" /></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-header"><div class="card-icon">🌈</div><div><div class="card-title">Gradient Background</div></div></div>
+      <div class="card-body">
+        <div style="margin-bottom:12px">
+          <label class="check-label"><input type="checkbox" id="menu-gradient-enabled" ${m.gradientEnabled?'checked':''} /> Enable gradient background (overrides solid colour)</label>
+        </div>
+        ${m.gradientEnabled ? `
+        <div class="grid-2" style="margin-bottom:14px">
+          ${colorPickerHTML('menu-gradient-color1', m.gradientColor1||'#080810', 'Gradient Start')}
+          ${colorPickerHTML('menu-gradient-color2', m.gradientColor2||'#1a1440', 'Gradient End')}
+        </div>
+        <div class="field" style="margin-bottom:14px"><label class="field-label">Direction</label>
+          <select id="menu-gradient-dir">
+            ${['vertical','horizontal','diagonal','radial'].map(d=>`<option ${(m.gradientDir||'vertical')===d?'selected':''}>${d}</option>`).join('')}
+          </select>
+        </div>` : ''}
+      </div>
+    </div>
+
+    ${m.backgroundImage ? `
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-header"><div class="card-icon">🔲</div><div><div class="card-title">Background Image Effects</div></div></div>
+      <div class="card-body">
+        <div style="margin-bottom:14px">
+          <label class="field-label" style="margin-bottom:8px;display:block">Blur: ${m.bgBlur||0}px</label>
+          <input type="range" id="menu-bg-blur" min="0" max="20" value="${m.bgBlur||0}" style="width:100%;accent-color:var(--gold)" />
+        </div>
+        <div style="margin-bottom:14px">
+          <label class="field-label" style="margin-bottom:8px;display:block">Brightness: ${m.bgBrightness||100}%</label>
+          <input type="range" id="menu-bg-brightness" min="20" max="150" value="${m.bgBrightness||100}" style="width:100%;accent-color:var(--gold)" />
+        </div>
+        <div style="margin-bottom:14px">
+          <label class="field-label" style="margin-bottom:8px;display:block">Contrast: ${m.bgContrast||100}%</label>
+          <input type="range" id="menu-bg-contrast" min="50" max="200" value="${m.bgContrast||100}" style="width:100%;accent-color:var(--gold)" />
+        </div>
+      </div>
+    </div>` : ''}
+
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-header"><div class="card-icon">✨</div><div><div class="card-title">Text Shadow</div></div></div>
+      <div class="card-body">
+        <div style="margin-bottom:12px">
+          <label class="check-label"><input type="checkbox" id="menu-text-shadow" ${m.textShadow?'checked':''} /> Enable text shadow</label>
+        </div>
+        ${m.textShadow ? `
+        <div class="grid-2" style="margin-bottom:14px">
+          ${colorPickerHTML('menu-text-shadow-color', m.textShadowColor||'#000000', 'Shadow Colour')}
+          <div class="field"><label class="field-label">Blur: ${m.textShadowBlur||4}px</label>
+            <input type="range" id="menu-text-shadow-blur" min="0" max="20" value="${m.textShadowBlur||4}" style="width:100%;accent-color:var(--gold)" />
+          </div>
+        </div>
+        <div class="grid-2" style="margin-bottom:14px">
+          <div class="field"><label class="field-label">Offset X: ${m.textShadowOffsetX||2}px</label>
+            <input type="range" id="menu-text-shadow-offset-x" min="-10" max="10" value="${m.textShadowOffsetX||2}" style="width:100%;accent-color:var(--gold)" />
+          </div>
+          <div class="field"><label class="field-label">Offset Y: ${m.textShadowOffsetY||2}px</label>
+            <input type="range" id="menu-text-shadow-offset-y" min="-10" max="10" value="${m.textShadowOffsetY||2}" style="width:100%;accent-color:var(--gold)" />
+          </div>
+        </div>` : ''}
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-header"><div class="card-icon">🖱</div><div><div class="card-title">Button & Episode Styling</div></div></div>
+      <div class="card-body">
+        <div style="margin-bottom:14px">
+          <label class="field-label" style="margin-bottom:8px;display:block">Button Border Radius: ${m.btnBorderRadius||4}px</label>
+          <input type="range" id="menu-btn-border-radius" min="0" max="20" value="${m.btnBorderRadius||4}" style="width:100%;accent-color:var(--gold)" />
+        </div>
+        <div class="grid-2" style="margin-bottom:14px">
+          <div class="field"><label class="field-label">Hover Effect</label>
+            <select id="menu-hover-effect">
+              ${['highlight','scale','underline','glow'].map(h=>`<option ${(m.hoverEffect||'highlight')===h?'selected':''}>${h}</option>`).join('')}
+            </select></div>
+          <div class="field"><label class="field-label">Episode Spacing: ${m.episodeSpacing||8}px</label>
+            <input type="range" id="menu-episode-spacing" min="0" max="32" value="${m.episodeSpacing||8}" style="width:100%;accent-color:var(--gold)" />
+          </div>
+        </div>
+        <label class="check-label"><input type="checkbox" id="menu-show-episode-numbers" ${m.showEpisodeNumbers!==false?'checked':''} /> Show episode numbers</label>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-header"><div class="card-icon">🏷</div><div><div class="card-title">Disc Title Overlay</div></div></div>
+      <div class="card-body">
+        <div style="margin-bottom:12px">
+          <label class="check-label"><input type="checkbox" id="menu-disc-title-overlay" ${m.discTitleOverlay?'checked':''} /> Show disc title overlay on menu screens</label>
+        </div>
+        ${m.discTitleOverlay ? `
+        <div class="field" style="margin-bottom:14px"><label class="field-label">Overlay Text</label>
+          <input type="text" id="menu-disc-title-text" value="${esc(m.discTitleText||'')}" placeholder="Disc title or series name" />
+        </div>
+        <div class="grid-2" style="margin-bottom:14px">
+          ${colorPickerHTML('menu-disc-title-color', m.discTitleColor||'#dbb85a', 'Title Colour')}
+          <div class="field"><label class="field-label">Font Size: ${m.discTitleFontSize||28}px</label>
+            <input type="range" id="menu-disc-title-size" min="12" max="72" value="${m.discTitleFontSize||28}" style="width:100%;accent-color:var(--gold)" />
+          </div>
+        </div>
+        <div class="field"><label class="field-label">Position</label>
+          <select id="menu-disc-title-position">
+            ${['top-left','top-center','top-right','bottom-left','bottom-center','bottom-right'].map(pos=>`<option ${(m.discTitlePosition||'top-center')===pos?'selected':''}>${pos}</option>`).join('')}
+          </select>
+        </div>` : ''}
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-header"><div class="card-icon">🎞</div><div><div class="card-title">Animated Background</div></div></div>
+      <div class="card-body">
+        <div style="margin-bottom:12px">
+          <label class="check-label"><input type="checkbox" id="menu-animated-bg" ${m.animatedBg?'checked':''} /> Enable animated background</label>
+        </div>
+        ${m.animatedBg ? `
+        <div class="field"><label class="field-label">Animation Type</label>
+          <select id="menu-anim-type">
+            ${['pan','pulse','particles'].map(a=>`<option ${(m.animationType||'pan')===a?'selected':''}>${a}</option>`).join('')}
+          </select>
+        </div>` : ''}
+      </div>
+    </div>
+
     <div class="card">
       <div class="card-header"><div class="card-icon">👁</div><div><div class="card-title">Live Preview</div><div class="card-subtitle">Approximate representation of the generated menu</div></div></div>
       <div class="card-body">${menuPreviewHTML()}</div>
@@ -1422,23 +1896,44 @@ function pageExtras(p, f) {
 
 // ── Build Modal ────────────────────────────────────────────────────────────────
 function buildModalHTML() {
-  const { buildSteps:steps, buildCurrentStep:cur, buildDone, buildError, builtIsoPath, project:p } = state;
+  const { buildSteps:steps, buildCurrentStep:cur, buildDone, buildError, builtIsoPath, builtIsoSize, project:p } = state;
   const pct = steps.length ? Math.round((cur/steps.length)*100) : 0;
 
-  // ETA calculation
+  // Elapsed time — frozen once the build finishes so the counter stops ticking
   const now = Date.now();
   if (!state.buildStartTime && !buildDone && !buildError) state.buildStartTime = now;
-  const elapsed = state.buildStartTime ? Math.floor((now - state.buildStartTime)/1000) : 0;
-  const elapsedStr = elapsed > 0 ? Math.floor(elapsed/60) + 'm ' + (elapsed%60) + 's' : '';
+  const endTs = state.buildEndTime || (buildDone ? now : null);
+  const elapsed = state.buildStartTime
+    ? Math.floor(((endTs || now) - state.buildStartTime) / 1000)
+    : 0;
+  function fmtSec(s) { return Math.floor(s/60) + 'm ' + (s%60) + 's'; }
+  const elapsedStr = elapsed > 0 ? fmtSec(elapsed) : '';
+
+  // Overall ETA (progress-based)
   let etaStr = '';
-  if (pct > 5 && pct < 100 && elapsed > 5) {
-    const totalEst = Math.round(elapsed / (pct/100));
+  if (!buildDone && pct > 5 && pct < 100 && elapsed > 5) {
+    const totalEst = Math.round(elapsed / (pct / 100));
     const remaining = Math.max(0, totalEst - elapsed);
-    etaStr = remaining > 0 ? '~' + Math.floor(remaining/60) + 'm ' + (remaining%60) + 's remaining' : 'Almost done...';
+    etaStr = remaining > 0 ? '~' + fmtSec(remaining) + ' remaining' : 'Almost done...';
   }
 
+  // Per-title ETA — average duration of already-completed title steps
+  const titleStepIdxs = steps.reduce(function(acc, s, i) {
+    if (s.startsWith('Processing title')) acc.push(i); return acc;
+  }, []);
+  const completedTitleDurations = [];
+  for (var ti = 0; ti < titleStepIdxs.length; ti++) {
+    const idx = titleStepIdxs[ti];
+    const nextIdx = titleStepIdxs[ti + 1] !== undefined ? titleStepIdxs[ti + 1] : idx + 1;
+    if (idx < cur && state.stepStartTimes[idx] && state.stepStartTimes[nextIdx]) {
+      completedTitleDurations.push(state.stepStartTimes[nextIdx] - state.stepStartTimes[idx]);
+    }
+  }
+  const avgTitleMs = completedTitleDurations.length
+    ? completedTitleDurations.reduce(function(a,b){return a+b;},0) / completedTitleDurations.length
+    : 0;
+
   if (buildError) {
-    // Map raw errors to friendly messages
     var friendlyError = buildError;
     var hint = '';
     if (buildError.includes('ffmpeg') && buildError.includes('not found')) {
@@ -1463,28 +1958,44 @@ function buildModalHTML() {
     return '<div class="modal-backdrop"><div class="modal-box">' +
       '<div class="modal-disc-icon" style="background:var(--red-dim);border-color:rgba(192,57,43,0.4)">❌</div>' +
       '<div class="modal-title">Build Failed</div>' +
-      '<div style="font-size:13px;color:#e08080;margin-bottom:10px;font-weight:500">' + esc(friendlyError) + '</div>' +
-      (hint ? '<div style="font-size:12px;color:var(--text-secondary);background:rgba(255,255,255,0.05);border-radius:6px;padding:8px 12px;margin-bottom:10px">' + esc(hint) + '</div>' : '') +
+      '<div style="font-size:13px;color:var(--red);margin-bottom:10px;font-weight:500">' + esc(friendlyError) + '</div>' +
+      (hint ? '<div style="font-size:12px;color:var(--text-secondary);background:var(--bg-sunken);border:1px solid var(--border-dim);border-radius:6px;padding:8px 12px;margin-bottom:10px">' + esc(hint) + '</div>' : '') +
       '<details style="margin-bottom:12px"><summary style="font-size:11px;color:var(--text-tertiary);cursor:pointer">Show technical details</summary>' +
-      '<pre style="background:var(--bg-sunken);border:1px solid var(--border-dim);border-radius:6px;padding:10px;font-size:10px;color:#e08080;text-align:left;max-height:140px;overflow-y:auto;font-family:var(--font-mono);white-space:pre-wrap;margin-top:6px">' + esc(buildError) + '</pre></details>' +
+      '<pre style="background:var(--bg-sunken);border:1px solid var(--border-dim);border-radius:6px;padding:10px;font-size:10px;color:var(--red);text-align:left;max-height:140px;overflow-y:auto;font-family:var(--font-mono);white-space:pre-wrap;margin-top:6px">' + esc(buildError) + '</pre></details>' +
       '<div class="modal-actions"><button class="btn btn-ghost" id="close-modal">Close</button></div>' +
       '</div></div>';
   }
 
-  if (buildDone) return '<div class="modal-backdrop"><div class="modal-box">' +
-    '<div class="modal-success-ring">✅</div>' +
-    '<div class="modal-title" style="color:var(--gold-bright)">Build Complete!</div>' +
-    '<div class="modal-sub">' + p.audioTracks.length + ' audio · ' + p.subtitleTracks.length + ' subtitles · ' + p.chapters.length + ' chapters · ' + p.extras.length + ' extras</div>' +
-    (elapsedStr ? '<div style="font-size:11px;color:var(--text-tertiary);margin-bottom:8px">Completed in ' + elapsedStr + '</div>' : '') +
-    '<div class="iso-path">' + esc(builtIsoPath||'') + '</div>' +
-    '<div class="modal-actions">' +
-    '<button class="btn btn-ghost" id="close-modal">Close</button>' +
-    '<button class="btn btn-primary" id="reveal-iso">Show in Finder</button>' +
-    '</div></div></div>';
+  if (buildDone) {
+    const isoSizeStr = builtIsoSize ? (builtIsoSize >= 1e9
+      ? (builtIsoSize/1e9).toFixed(2) + ' GB'
+      : (builtIsoSize/1e6).toFixed(0) + ' MB') : null;
+    return '<div class="modal-backdrop"><div class="modal-box">' +
+      '<div class="modal-success-ring">✅</div>' +
+      '<div class="modal-title" style="color:var(--gold-bright)">Build Complete!</div>' +
+      (isoSizeStr ? '<div style="font-size:22px;font-weight:700;color:var(--text-primary);margin-bottom:4px">' + isoSizeStr + '</div>' +
+        '<div style="font-size:11px;color:var(--text-tertiary);margin-bottom:10px">ISO file size</div>' : '') +
+      '<div class="modal-sub">' + p.audioTracks.length + ' audio · ' + p.subtitleTracks.length + ' subtitles · ' + p.chapters.length + ' chapters · ' + p.extras.length + ' extras</div>' +
+      (elapsedStr ? '<div style="font-size:11px;color:var(--text-tertiary);margin-bottom:8px">Completed in ' + elapsedStr + '</div>' : '') +
+      '<div class="iso-path">' + esc(builtIsoPath||'') + '</div>' +
+      '<div class="modal-actions">' +
+      '<button class="btn btn-ghost" id="close-modal">Close</button>' +
+      '<button class="btn btn-primary" id="reveal-iso">Show in Finder</button>' +
+      '</div></div></div>';
+  }
 
   const stepsHTML = steps.map(function(s,i) {
     const cls = i<cur?'done':i===cur?'active':'wait';
-    return '<div class="build-step"><div class="step-indicator ' + cls + '">' + (i<cur?'✓':i+1) + '</div><span class="step-text ' + cls + '">' + s + '</span></div>';
+    const detail = state.stepDetails[i] ? ' <span style="color:var(--text-tertiary);font-size:10px;margin-left:6px">— ' + esc(state.stepDetails[i]) + '</span>' : '';
+    // For active title steps, show ETA based on average completed title duration
+    let titleEta = '';
+    if (cls === 'active' && s.startsWith('Processing title') && avgTitleMs > 0) {
+      const remaining = titleStepIdxs.filter(function(j){return j>=i;}).length;
+      const etaSec = Math.round(remaining * avgTitleMs / 1000);
+      if (etaSec > 3) titleEta = ' <span style="color:var(--text-tertiary);font-size:10px;margin-left:6px">~' + fmtSec(etaSec) + ' remaining</span>';
+    }
+    return '<div class="build-step"><div class="step-indicator ' + cls + '">' + (i<cur?'✓':i+1) + '</div>' +
+      '<span class="step-text ' + cls + '">' + s + detail + titleEta + '</span></div>';
   }).join('');
 
   return '<div class="modal-backdrop"><div class="modal-box">' +
@@ -1501,12 +2012,12 @@ function buildModalHTML() {
 }
 
 function burnModalHTML() {
-  const { burnStatus, burnMessage, burnDone, burnError } = state;
+  const { burnStatus, burnMessage, burnDone, burnError, burnPercent, burnDriveInfo } = state;
 
   if (burnError) return `<div class="modal-backdrop"><div class="modal-box">
     <div class="modal-disc-icon" style="background:var(--red-dim);border-color:rgba(192,57,43,0.4)">❌</div>
     <div class="modal-title">Burn Failed</div>
-    <pre style="background:var(--bg-sunken);border:1px solid var(--border-dim);border-radius:var(--radius-md);padding:12px;font-size:11px;color:#e08080;text-align:left;max-height:160px;overflow-y:auto;font-family:var(--font-mono);white-space:pre-wrap;margin-bottom:16px">${esc(burnError)}</pre>
+    <pre style="background:var(--bg-sunken);border:1px solid var(--border-dim);border-radius:var(--radius-md);padding:12px;font-size:11px;color:var(--red);text-align:left;max-height:160px;overflow-y:auto;font-family:var(--font-mono);white-space:pre-wrap;margin-bottom:16px">${esc(burnError)}</pre>
     <div class="modal-actions"><button class="btn btn-ghost" id="close-burn-modal">Close</button></div>
   </div></div>`;
 
@@ -1517,14 +2028,37 @@ function burnModalHTML() {
     <div class="modal-actions"><button class="btn btn-ghost" id="close-burn-modal">Done</button></div>
   </div></div>`;
 
+  // Drive info panel
+  const drivePanel = burnDriveInfo ? (() => {
+    const d = burnDriveInfo;
+    const discOk = d.discStatus?.hasDisc;
+    const driveName = d.drives?.[0]?.name || 'Optical Drive';
+    const discLabel = discOk
+      ? (d.discStatus.isBlank ? (d.discStatus.isBD ? 'Blank BD-R detected' : 'Blank disc detected') : 'Disc detected (check it is blank)')
+      : 'No disc detected — insert a blank BD-R';
+    return `<div style="background:var(--bg-sunken);border:1px solid var(--border-dim);border-radius:6px;padding:8px 12px;margin-bottom:12px;font-size:12px;color:var(--text-secondary)">
+      <div style="font-weight:600;color:var(--text-primary);margin-bottom:4px">💿 ${esc(driveName)}</div>
+      <div style="${discOk?'color:var(--green)':'color:var(--red)'}">${discLabel}</div>
+      ${d.deviceNode ? `<div style="color:var(--text-tertiary);font-family:var(--font-mono);font-size:11px;margin-top:2px">${esc(d.deviceNode)}</div>` : ''}
+    </div>`;
+  })() : '';
+
+  const pct = burnPercent != null ? burnPercent : (burnStatus==='done'?100:burnStatus==='burning'?30:5);
+  const pctLabel = burnPercent != null ? Math.round(burnPercent) + '%' : '';
+
   return `<div class="modal-backdrop"><div class="modal-box">
     <div class="modal-disc-icon" style="animation:spin 2s linear infinite;display:inline-flex">💿</div>
     <div class="modal-title">Burning Disc</div>
     <div class="modal-sub">Do not eject the disc or close the app.</div>
-    <div class="progress-bar-wrap" style="margin:16px 0">
-      <div class="progress-bar-fill" style="width:${burnStatus==='done'?100:burnStatus==='burning'?60:20}%;transition:width 1s"></div>
+    ${drivePanel}
+    <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-tertiary);margin-bottom:4px">
+      <span>${burnStatus === 'starting' ? 'Preparing...' : burnStatus === 'burning' ? 'Writing...' : 'Finalizing...'}</span>
+      <span>${pctLabel}</span>
     </div>
-    <div class="ffmpeg-log" style="text-align:left">${esc(burnMessage||'Preparing...')}</div>
+    <div class="progress-bar-wrap" style="margin-bottom:12px">
+      <div class="progress-bar-fill" style="width:${pct}%;transition:width 0.5s ease"></div>
+    </div>
+    <div class="ffmpeg-log" style="text-align:left;max-height:80px;overflow-y:auto">${esc(burnMessage||'Preparing...')}</div>
   </div></div>`;
 }
 
@@ -1539,23 +2073,23 @@ function welcomeModalHTML() {
 
   const stepsHTML = steps.map(function(s) {
     return '<div style="display:flex;gap:14px;align-items:flex-start;margin-bottom:14px">' +
-      '<div style="width:36px;height:36px;border-radius:10px;background:rgba(219,184,90,0.15);border:1px solid rgba(219,184,90,0.4);display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0">' + s.icon + '</div>' +
+      '<div style="width:36px;height:36px;border-radius:10px;background:var(--gold-glow);border:1px solid rgba(219,184,90,0.4);display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0">' + s.icon + '</div>' +
       '<div>' +
-      '<div style="font-size:13px;font-weight:700;color:#f0e8d0;margin-bottom:3px">' + s.title + '</div>' +
-      '<div style="font-size:12px;color:#b0aec0;line-height:1.6">' + s.desc + '</div>' +
+      '<div style="font-size:13px;font-weight:700;color:var(--text-primary);margin-bottom:3px">' + s.title + '</div>' +
+      '<div style="font-size:12px;color:var(--text-secondary);line-height:1.6">' + s.desc + '</div>' +
       '</div></div>';
   }).join('');
 
   return '<div class="modal-backdrop"><div class="modal-box" style="max-width:480px">' +
     '<div style="text-align:center;margin-bottom:20px">' +
     '<div style="font-size:48px;margin-bottom:8px">💿</div>' +
-    '<div style="font-size:22px;font-weight:700;color:#f0e8d0;margin-bottom:6px">Welcome to Disc Forge</div>' +
-    '<div style="font-size:13px;color:#9090a8">Professional Blu-ray authoring for macOS</div>' +
+    '<div style="font-size:22px;font-weight:700;color:var(--text-primary);margin-bottom:6px">Welcome to Disc Forge</div>' +
+    '<div style="font-size:13px;color:var(--text-tertiary)">Professional Blu-ray authoring for macOS</div>' +
     '</div>' +
     stepsHTML +
-    '<div style="background:rgba(219,184,90,0.1);border:1px solid rgba(219,184,90,0.3);border-radius:8px;padding:12px 14px;margin-bottom:16px">' +
-    '<div style="font-size:12px;color:#dbb85a;font-weight:700;margin-bottom:4px">💡 Quick tip</div>' +
-    '<div style="font-size:12px;color:#c0b890;line-height:1.5">Use the Menu tab interactive preview to click around your disc menu before burning. Navigate between the main menu, episodes, audio and subtitle screens.</div>' +
+    '<div style="background:var(--gold-glow);border:1px solid rgba(219,184,90,0.3);border-radius:8px;padding:12px 14px;margin-bottom:16px">' +
+    '<div style="font-size:12px;color:var(--gold-bright);font-weight:700;margin-bottom:4px">💡 Quick tip</div>' +
+    '<div style="font-size:12px;color:var(--text-secondary);line-height:1.5">Use the Menu tab interactive preview to click around your disc menu before burning. Navigate between the main menu, episodes, audio and subtitle screens.</div>' +
     '</div>' +
     '<div class="modal-actions">' +
     '<button class="btn btn-primary" id="close-welcome" style="width:100%;font-size:15px;padding:12px">Get Started →</button>' +
@@ -1566,6 +2100,11 @@ function welcomeModalHTML() {
 // ── About Modal ───────────────────────────────────────────────────────────────
 function aboutModalHTML() {
   const versions = [
+    { v:'1.5.2', notes:['Video Quality Mode — per-title quality selector: Passthrough (stream copy), High Quality CRF 18, Balanced CRF 20, Compact CRF 23', 'CRF re-encode produces BD-compliant H.264 High Profile output', 'Size estimates update per-title based on selected quality multiplier', 'CRF encode progress shows fps, frame count, and estimated time remaining', 'Apply-to-all quality button for quick global quality changes', 'Quality badge per title: green Copy / yellow CRF N'] },
+    { v:'1.5.1', notes:['Accurate disc size estimation: video bitrate + AC3 audio + subtitle overhead via ffprobe', 'Elapsed timer stops when build completes', 'ISO file size shown prominently in success screen', 'Build steps show output file size on completion', 'Per-title ETA based on previous title durations', 'Disc capacity warning if estimate exceeds BD-25 or BD-50', 'Disc capacity fill bar added to Project tab'] },
+    { v:'1.5', notes:['Disc burning with real-time progress (growisofs + hdiutil fallback)', 'Chapter thumbnails — auto-generate 160×90 previews per chapter via FFmpeg', 'Passthrough mode — skip FFmpeg transcode for BD-compatible H.264/HEVC titles', 'BD compatibility detection badge per title (Passthrough / Transcode)', 'Enhanced menu customization: 6 new themes (Minimal, Cinema, Vintage, Neon, Grid, Sidebar)', 'Gradient background with direction selector', 'Background image blur/brightness/contrast controls', 'Font size sliders for title (24–96px) and episodes (12–36px)', 'Font weight & letter spacing', 'Text shadow with colour, blur, and X/Y offset', 'Button border radius & hover effects (highlight, scale, underline, glow)', 'Episode spacing & number toggle', 'Disc title overlay with position selector', 'Animated background (pan, pulse, particles)'] },
+    { v:'1.4', notes:['Full subtitle support on all episodes (ASS/SRT→PGS conversion via pysubs2 + tsMuxeR)', 'mkvmerge integration for clean multi-track MKV assembly', 'Track name metadata from source MKV', 'Java + BDSup2Sub support for future PGS workflows'] },
+    { v:'1.3', notes:['Fix subtitle tracks from episodes 2+ leaking into main tsMuxeR meta', 'Fix missing track= parameter on embedded subtitle entries', 'Multi-title navigation: regenerate index.bdmv + MovieObject.bdmv for N titles', 'Path escaping for filenames containing double-quotes in tsMuxeR meta', 'patchClipId magic guard prevents corrupting non-MPLS/CLPI files'] },
     { v:'1.2', notes:['Burn to BD-R disc directly', 'Interactive menu preview simulator', 'Episode / audio / subtitle menu screens', 'Persistent colour picker with presets', 'Chapter auto-import from video files', 'Custom button text & emoji toggle', 'Text stroke/outline on menu title', 'Logo/watermark image support', 'Project save & load (.dfp files)', 'Build progress with ETA & elapsed time', 'About screen & version history'] },
     { v:'1.1', notes:['Light mode default with dark toggle', 'Multiple video titles per disc', 'Disc capacity meter (DVD-5/BD-25/BD-50/BD-100)', 'Subtitle descriptions per track', 'System font picker', 'Scroll position preserved on re-render', 'Multi-file video selection'] },
     { v:'1.0', notes:['Initial release', 'FFmpeg mux → tsMuxeR BDMV → hdiutil ISO', 'MKV import with ffprobe track detection', '7-tab interface', 'Dark studio theme'] },
@@ -1583,7 +2122,7 @@ function aboutModalHTML() {
     '<div style="text-align:center;margin-bottom:16px">' +
     '<div style="font-size:40px;margin-bottom:6px">💿</div>' +
     '<div class="modal-title" style="font-size:20px">Disc Forge</div>' +
-    '<div style="font-size:12px;color:var(--gold);font-weight:600;margin-bottom:4px">Version 1.2.0</div>' +
+    '<div style="font-size:12px;color:var(--gold);font-weight:600;margin-bottom:4px">Version 1.5.2</div>' +
     '<div style="font-size:11px;color:var(--text-tertiary)">Professional Blu-ray authoring for macOS</div>' +
     '</div>' +
     '<div style="max-height:320px;overflow-y:auto;border-top:1px solid var(--border-dim);border-bottom:1px solid var(--border-dim);padding:12px 0;margin-bottom:14px">' +
@@ -1599,7 +2138,7 @@ function aboutModalHTML() {
 // ── Project Save/Load ──────────────────────────────────────────────────────────
 async function saveProject() {
   const proj = {
-    version: '1.2',
+    version: '1.5',
     title: state.project.title,
     description: state.project.description,
     discLabel: state.project.discLabel,
@@ -1683,6 +2222,7 @@ function attachListeners() {
   document.getElementById('proj-label')?.addEventListener('input',  e => setPrjText({ discLabel: e.target.value }));
   document.getElementById('proj-desc')?.addEventListener('input',   e => setPrjText({ description: e.target.value }));
   document.getElementById('proj-res')?.addEventListener('change',   e => setPrj({ resolution: e.target.value }));
+  document.getElementById('force-transcode')?.addEventListener('change', e => setPrj({ forceTranscode: e.target.checked }));
   document.getElementById('proj-vcodec')?.addEventListener('change',e => setPrj({ videoFormat: e.target.value }));
   document.getElementById('pick-main-video')?.addEventListener('click', pickMainVideo);
 
@@ -1727,6 +2267,7 @@ function attachListeners() {
       if (existingEmbedded.some(t => t.sourceFile === filePath)) continue;
       const probe = await window.discForge.probeFile(filePath);
       if (!probe.success || !probe.data) continue;
+      cacheProbeData(filePath, probe.data);
       const streams = probe.data.streams || [];
       const detected = streams
         .filter(s => s.codec_type === 'audio' || s.codec_type === 'subtitle')
@@ -1782,8 +2323,14 @@ function attachListeners() {
           return { id: uid(), name, time };
         });
         state.project = { ...state.project, chapters: newChapters };
-        sendLog && sendLog('Auto-imported ' + newChapters.length + ' chapters');
+        console.log('Auto-imported ' + newChapters.length + ' chapters');
       }
+
+      // Feature 3: detect BD compatibility for passthrough mode
+      try {
+        const compat = await window.discForge.detectBdCompatibility(filePath);
+        state.titleCompatibility = { ...state.titleCompatibility, [filePath]: compat };
+      } catch(_) {}
     }
   render();
 });
@@ -1804,6 +2351,28 @@ function attachListeners() {
     input.addEventListener('keydown', e => {
       e.stopPropagation();
     });
+  });
+
+  // Video quality selector per title
+  document.querySelectorAll('.title-quality-select').forEach(sel => {
+    sel.addEventListener('change', e => {
+      const id  = sel.dataset.titleId;
+      const quality = e.target.value;
+      if (id === '__main__') {
+        setPrj({ mainVideo: { ...state.project.mainVideo, videoQuality: quality } });
+      } else {
+        setPrj({ titles: (state.project.titles||[]).map(t => t.id === id ? { ...t, videoQuality: quality } : t) });
+      }
+    });
+  });
+
+  // Apply quality to all titles
+  document.getElementById('quality-apply-all')?.addEventListener('click', () => {
+    const quality = document.getElementById('quality-apply-select')?.value || 'passthrough';
+    const p = state.project;
+    const newMainVideo = p.mainVideo ? { ...p.mainVideo, videoQuality: quality } : null;
+    const newTitles = (p.titles||[]).map(t => ({ ...t, videoQuality: quality }));
+    setPrj({ mainVideo: newMainVideo, titles: newTitles });
   });
 
   // Remove title
@@ -1929,6 +2498,36 @@ function attachListeners() {
   document.getElementById('menu-btn-layout')?.addEventListener('change', e => setMenu({ buttonLayout:e.target.value }));
   document.getElementById('menu-overlay-opacity')?.addEventListener('input', e => setMenu({ overlayOpacity:parseInt(e.target.value) }));
   document.getElementById('menu-text-stroke')?.addEventListener('change', e => setMenu({ textStroke:e.target.checked }));
+  // Font sizing & spacing
+  document.getElementById('menu-title-font-size')?.addEventListener('input', e => setMenu({ titleFontSize:parseInt(e.target.value) }));
+  document.getElementById('menu-episode-font-size')?.addEventListener('input', e => setMenu({ episodeFontSize:parseInt(e.target.value) }));
+  document.getElementById('menu-font-weight')?.addEventListener('change', e => setMenu({ fontWeight:e.target.value }));
+  document.getElementById('menu-letter-spacing')?.addEventListener('input', e => setMenu({ letterSpacing:parseInt(e.target.value) }));
+  // Gradient background
+  document.getElementById('menu-gradient-enabled')?.addEventListener('change', e => setMenu({ gradientEnabled:e.target.checked }));
+  document.getElementById('menu-gradient-dir')?.addEventListener('change', e => setMenu({ gradientDir:e.target.value }));
+  // Background image effects
+  document.getElementById('menu-bg-blur')?.addEventListener('input', e => setMenu({ bgBlur:parseInt(e.target.value) }));
+  document.getElementById('menu-bg-brightness')?.addEventListener('input', e => setMenu({ bgBrightness:parseInt(e.target.value) }));
+  document.getElementById('menu-bg-contrast')?.addEventListener('input', e => setMenu({ bgContrast:parseInt(e.target.value) }));
+  // Text shadow
+  document.getElementById('menu-text-shadow')?.addEventListener('change', e => setMenu({ textShadow:e.target.checked }));
+  document.getElementById('menu-text-shadow-blur')?.addEventListener('input', e => setMenu({ textShadowBlur:parseInt(e.target.value) }));
+  document.getElementById('menu-text-shadow-offset-x')?.addEventListener('input', e => setMenu({ textShadowOffsetX:parseInt(e.target.value) }));
+  document.getElementById('menu-text-shadow-offset-y')?.addEventListener('input', e => setMenu({ textShadowOffsetY:parseInt(e.target.value) }));
+  // Button & episode styling
+  document.getElementById('menu-btn-border-radius')?.addEventListener('input', e => setMenu({ btnBorderRadius:parseInt(e.target.value) }));
+  document.getElementById('menu-hover-effect')?.addEventListener('change', e => setMenu({ hoverEffect:e.target.value }));
+  document.getElementById('menu-episode-spacing')?.addEventListener('input', e => setMenu({ episodeSpacing:parseInt(e.target.value) }));
+  document.getElementById('menu-show-episode-numbers')?.addEventListener('change', e => setMenu({ showEpisodeNumbers:e.target.checked }));
+  // Disc title overlay
+  document.getElementById('menu-disc-title-overlay')?.addEventListener('change', e => setMenu({ discTitleOverlay:e.target.checked }));
+  document.getElementById('menu-disc-title-text')?.addEventListener('input', e => { _focusedId='menu-disc-title-text'; _focusedPos=e.target.selectionStart; setMenu({ discTitleText:e.target.value }); });
+  document.getElementById('menu-disc-title-size')?.addEventListener('input', e => setMenu({ discTitleFontSize:parseInt(e.target.value) }));
+  document.getElementById('menu-disc-title-position')?.addEventListener('change', e => setMenu({ discTitlePosition:e.target.value }));
+  // Animated background
+  document.getElementById('menu-animated-bg')?.addEventListener('change', e => setMenu({ animatedBg:e.target.checked }));
+  document.getElementById('menu-anim-type')?.addEventListener('change', e => setMenu({ animationType:e.target.value }));
 
   document.getElementById('menu-stroke-width')?.addEventListener('input', e => setMenu({ textStrokeWidth:parseInt(e.target.value) }));
   document.getElementById('menu-show-emojis')?.addEventListener('change', e => setMenu({ showButtonEmojis:e.target.checked }));
@@ -1976,6 +2575,7 @@ function attachListeners() {
     setPrj({ chapters: newChapters });
     alert('Imported ' + newChapters.length + ' chapters!');
   });
+  document.getElementById('gen-thumbs-btn')?.addEventListener('click', generateChapterThumbnails);
   document.getElementById('clear-chapters-btn')?.addEventListener('click', () => {
     if (confirm('Clear all chapters?')) setPrj({ chapters: [] });
   });
@@ -2009,11 +2609,18 @@ function attachListeners() {
   document.getElementById('burn-btn')?.addEventListener('click', async () => {
     if (!state.builtIsoPath) return;
     window.discForge.removeAllListeners('burn-progress');
-    setState({ burning: true, burnStatus: 'checking', burnMessage: 'Checking for disc...', burnDone: false, burnError: null });
+    setState({ burning: true, burnStatus: 'checking', burnMessage: 'Detecting optical drives...', burnDone: false, burnError: null, burnPercent: 0, burnDriveInfo: null });
+
+    // Detect drives and show info
+    try {
+      const driveInfo = await window.discForge.detectDrives();
+      setState({ burnDriveInfo: driveInfo, burnMessage: 'Drive detected — starting burn...' });
+    } catch(_) {}
+
     window.discForge.onBurnProgress(data => {
-      if (data.status === 'done') setState({ burnDone: true, burnStatus: 'done', burnMessage: data.message });
+      if (data.status === 'done') setState({ burnDone: true, burnStatus: 'done', burnMessage: data.message, burnPercent: 100 });
       else if (data.status === 'error') setState({ burning: true, burnError: data.message });
-      else setState({ burnStatus: data.status, burnMessage: data.message });
+      else setState({ burnStatus: data.status, burnMessage: data.message, burnPercent: data.percent != null ? data.percent : state.burnPercent });
     });
     const result = await window.discForge.burnISO(state.builtIsoPath);
     if (result.error) setState({ burning: true, burnError: result.error });

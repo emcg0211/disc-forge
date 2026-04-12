@@ -1,13 +1,13 @@
 {
   "name": "disc-forge",
-  "version": "1.2.0",
+  "version": "1.5.2",
   "description": "Professional Blu-ray Authoring Studio for macOS",
   "main": "src/main.js",
   "author": "Disc Forge",
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
-    "build": "electron-builder --mac --universal",
+    "build": "electron-builder --mac --arm64",
     "build-arm": "electron-builder --mac --arm64",
     "build-x64": "electron-builder --mac --x64",
     "pack": "electron-builder --dir"
@@ -52,13 +52,13 @@
         {
           "target": "dmg",
           "arch": [
-            "universal"
+            "arm64"
           ]
         },
         {
           "target": "zip",
           "arch": [
-            "universal"
+            "arm64"
           ]
         }
       ]

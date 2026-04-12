@@ -61,7 +61,7 @@ ok "Icon built"
 
 # Step 5: Build the app
 step "Building universal app + DMG (this takes 3–5 minutes)"
-npm run build -- --mac --universal 2>&1 | grep -E '^(  •|  ✓|  building|  packing|  created|error)' || true
+npm run build 2>&1 | grep -E '^(  •|  ✓|  building|  packing|  created|error)' || true
 
 # Step 6: Verify output
 DMG=$(ls dist/*.dmg 2>/dev/null | head -1)

@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Disc Forge — Blu-ray Authoring for Mac</title>
+  <meta name="description" content="The modern Blu-ray disc authoring app for macOS. Build and burn BD-R discs from your own video files.">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif; background: #f0f2f5; color: #1a1a2e; }
+
+    /* Hero */
+    .hero { background: linear-gradient(135deg, #080810 0%, #0e1020 100%); color: #fff; padding: 80px 24px 100px; text-align: center; }
+    .hero-icon { font-size: 80px; margin-bottom: 24px; display: block; }
+    .hero h1 { font-size: 56px; font-weight: 700; letter-spacing: -1px; margin-bottom: 8px; }
+    .hero h1 span { color: #dbb85a; }
+    .hero-version { font-size: 13px; color: #666; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.1); border-radius: 20px; padding: 4px 12px; display: inline-block; margin-bottom: 20px; }
+    .hero-sub { font-size: 22px; color: #aab; max-width: 540px; margin: 0 auto 40px; line-height: 1.5; }
+    .hero-cta { display: inline-flex; align-items: center; gap: 12px; background: #dbb85a; color: #1a0e00; font-size: 18px; font-weight: 700; padding: 16px 36px; border-radius: 12px; text-decoration: none; transition: transform 0.15s, box-shadow 0.15s; }
+    .hero-cta:hover { transform: translateY(-2px); box-shadow: 0 8px 32px rgba(219,184,90,0.4); }
+    .hero-price { font-size: 13px; color: #888; margin-top: 16px; }
+    .hero-os { font-size: 12px; color: #555; margin-top: 8px; }
+
+    /* Features */
+    .section { max-width: 960px; margin: 0 auto; padding: 80px 24px; }
+    .section-title { font-size: 36px; font-weight: 700; text-align: center; margin-bottom: 12px; }
+    .section-sub { font-size: 17px; color: #666; text-align: center; margin-bottom: 56px; }
+    .features { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 24px; }
+    .feature { background: #fff; border-radius: 16px; padding: 28px; box-shadow: 0 2px 16px rgba(0,0,0,0.06); }
+    .feature-icon { font-size: 36px; margin-bottom: 16px; }
+    .feature h3 { font-size: 18px; font-weight: 700; margin-bottom: 8px; }
+    .feature p { font-size: 14px; color: #666; line-height: 1.6; }
+
+    /* How it works */
+    .steps-bg { background: #fff; }
+    .steps { display: flex; flex-direction: column; gap: 32px; max-width: 640px; margin: 0 auto; }
+    .step { display: flex; gap: 20px; align-items: flex-start; }
+    .step-num { width: 40px; height: 40px; border-radius: 50%; background: #dbb85a; color: #1a0e00; font-weight: 700; font-size: 18px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+    .step-body h3 { font-size: 17px; font-weight: 700; margin-bottom: 4px; }
+    .step-body p { font-size: 14px; color: #666; line-height: 1.6; }
+
+    /* Pricing */
+    .pricing-card { background: #fff; border-radius: 20px; padding: 48px; text-align: center; max-width: 400px; margin: 0 auto; box-shadow: 0 4px 32px rgba(0,0,0,0.08); border: 2px solid #dbb85a; }
+    .price { font-size: 64px; font-weight: 800; color: #dbb85a; line-height: 1; }
+    .price-label { font-size: 14px; color: #888; margin-bottom: 24px; }
+    .price-features { list-style: none; text-align: left; margin-bottom: 32px; }
+    .price-features li { padding: 8px 0; border-bottom: 1px solid #f0f2f5; font-size: 14px; display: flex; align-items: center; gap: 10px; }
+    .price-features li::before { content: '✓'; color: #dbb85a; font-weight: 700; }
+    .buy-btn { display: block; background: #dbb85a; color: #1a0e00; font-size: 18px; font-weight: 700; padding: 16px; border-radius: 12px; text-decoration: none; }
+    .buy-btn:hover { background: #c9a848; }
+
+    /* Footer */
+    footer { background: #080810; color: #555; text-align: center; padding: 40px 24px; font-size: 13px; }
+    footer a { color: #888; text-decoration: none; }
+
+    @media (max-width: 600px) {
+      .hero h1 { font-size: 36px; }
+      .hero-sub { font-size: 18px; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Hero -->
+  <div class="hero">
+    <span class="hero-icon">💿</span>
+    <div class="hero-version">Version 1.2 · macOS</div>
+    <h1>Disc <span>Forge</span></h1>
+    <p class="hero-sub">The modern Blu-ray authoring app for Mac. Build and burn BD-R discs from your own video files.</p>
+    <a href="#" class="hero-cta">
+      <span>⬇</span> Download for Mac
+    </a>
+    <p class="hero-price">$5 · One-time purchase · No subscription · No DRM</p>
+    <p class="hero-os">Requires macOS 12.0 or later · Apple Silicon & Intel</p>
+  </div>
+
+  <!-- Features -->
+  <div class="section">
+    <h2 class="section-title">Everything you need to author Blu-ray discs</h2>
+    <p class="section-sub">No command line. No technical setup. Just drag, select, and burn.</p>
+    <div class="features">
+      <div class="feature">
+        <div class="feature-icon">🎬</div>
+        <h3>Multi-Title Discs</h3>
+        <p>Add multiple video files to create TV season discs or multi-episode compilations. Each file becomes a separate title.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">🔊</div>
+        <h3>Full Track Control</h3>
+        <p>Auto-detects all embedded audio and subtitle tracks from your MKV files. DTS-HD MA, TrueHD, PCM, PGS subtitles — all supported.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">💿</div>
+        <h3>Direct Disc Burning</h3>
+        <p>Burn directly to BD-R, BD-25, BD-50, or BD-100 discs without leaving the app. Real-time capacity meter keeps you on track.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">🎨</div>
+        <h3>Custom Menus</h3>
+        <p>Design disc menus with custom backgrounds, fonts, and colors. Live preview updates as you make changes.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">💾</div>
+        <h3>Save Projects</h3>
+        <p>Save your disc projects and reload them anytime. Perfect for recurring disc authoring workflows.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">☀️</div>
+        <h3>Native macOS Design</h3>
+        <p>Clean light and dark mode, designed to feel at home on your Mac. No Windows ports, no Electron clutter.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- How it works -->
+  <div class="steps-bg">
+    <div class="section">
+      <h2 class="section-title">How it works</h2>
+      <p class="section-sub">From video files to finished disc in four steps.</p>
+      <div class="steps">
+        <div class="step">
+          <div class="step-num">1</div>
+          <div class="step-body">
+            <h3>Add your video files</h3>
+            <p>Select one or more MKV, MP4, or M2TS files. Disc Forge automatically detects all embedded audio, subtitle, and chapter tracks using ffprobe.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">2</div>
+          <div class="step-body">
+            <h3>Choose your tracks</h3>
+            <p>Check or uncheck exactly which audio languages and subtitle tracks you want included. Full codec info shown for every stream.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">3</div>
+          <div class="step-body">
+            <h3>Build the disc image</h3>
+            <p>Click Build Disc Image. Disc Forge muxes your content into a proper Blu-ray structure and packages it as a UDF 2.5 ISO file.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">4</div>
+          <div class="step-body">
+            <h3>Burn to disc</h3>
+            <p>Insert a blank BD-R and click Burn to Disc. Your disc is ready in minutes, with the disc ejected automatically when done.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Pricing -->
+  <div class="section">
+    <h2 class="section-title">Simple pricing</h2>
+    <p class="section-sub">One price. Yours forever.</p>
+    <div class="pricing-card">
+      <div class="price">$5</div>
+      <div class="price-label">One-time purchase</div>
+      <ul class="price-features">
+        <li>Full app — no feature limits</li>
+        <li>All future updates included</li>
+        <li>No subscription or account required</li>
+        <li>No DRM — yours to keep</li>
+        <li>macOS 12+ · Apple Silicon & Intel</li>
+      </ul>
+      <a href="#" class="buy-btn">Buy Disc Forge — $5</a>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <footer>
+    <p>Disc Forge © 2025 · Built for macOS</p>
+    <p style="margin-top:8px">Powered by <a href="https://ffmpeg.org">FFmpeg</a> · <a href="https://github.com/justdan96/tsMuxer">tsMuxeR</a></p>
+  </footer>
+
+</body>
+</html>

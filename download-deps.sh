@@ -17,27 +17,48 @@ echo ""
 mkdir -p bin
 
 # ── FFmpeg ────────────────────────────────────────────────────────────────────
+# A distributable bundle requires statically linked binaries.  Homebrew ffmpeg
+# is dynamically linked against Cellar dylibs that don't exist on other machines.
+# We detect dynamic linking and always download the static build in that case.
+
+is_static() {
+  # Returns 0 (true) if the binary has no non-system dynamic dependencies
+  local deps
+  deps=$(otool -L "$1" 2>/dev/null | grep -v ':$' | grep -v '/System/' | grep -v '/usr/lib/' | grep -v "$1" | wc -l | tr -d ' ')
+  [ "$deps" -eq 0 ]
+}
+
+download_static_ffmpeg() {
+  step "Downloading FFmpeg static build from evermeet.cx..."
+  mkdir -p /tmp/df_deps
+  curl -L "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip"  -o /tmp/df_deps/ffmpeg.zip  --progress-bar
+  unzip -o /tmp/df_deps/ffmpeg.zip  -d /tmp/df_deps/ff_out  > /dev/null
+  chmod -f +w bin/ffmpeg bin/ffprobe 2>/dev/null || true
+  cp /tmp/df_deps/ff_out/ffmpeg  bin/ffmpeg  && chmod +x bin/ffmpeg
+  curl -L "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip" -o /tmp/df_deps/ffprobe.zip --progress-bar
+  unzip -o /tmp/df_deps/ffprobe.zip -d /tmp/df_deps/fp_out > /dev/null
+  chmod -f +w bin/ffmpeg bin/ffprobe 2>/dev/null || true
+  cp /tmp/df_deps/fp_out/ffprobe bin/ffprobe && chmod +x bin/ffprobe
+  rm -rf /tmp/df_deps
+  ok "FFmpeg static build downloaded and bundled"
+}
+
 if [ -f "bin/ffmpeg" ] && [ -f "bin/ffprobe" ]; then
-  ok "FFmpeg already bundled"
+  if is_static "bin/ffmpeg"; then
+    ok "FFmpeg already bundled (static)"
+  else
+    echo -e "  ${GOLD}⚠ Bundled FFmpeg is dynamically linked — replacing with static build${NC}"
+    download_static_ffmpeg
+  fi
 else
-  step "Bundling FFmpeg..."
   FFMPEG_PATH=$(which ffmpeg 2>/dev/null || echo "")
   FFPROBE_PATH=$(which ffprobe 2>/dev/null || echo "")
-  if [ -n "$FFMPEG_PATH" ] && [ -n "$FFPROBE_PATH" ]; then
+  if [ -n "$FFMPEG_PATH" ] && [ -n "$FFPROBE_PATH" ] && is_static "$FFMPEG_PATH"; then
     cp "$FFMPEG_PATH" bin/ffmpeg && cp "$FFPROBE_PATH" bin/ffprobe
     chmod +x bin/ffmpeg bin/ffprobe
-    ok "FFmpeg bundled from Homebrew"
+    ok "FFmpeg bundled from system (static)"
   else
-    step "Downloading FFmpeg static build (~60MB)..."
-    mkdir -p /tmp/df_deps
-    curl -L "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip" -o /tmp/df_deps/ffmpeg.zip --progress-bar
-    unzip -o /tmp/df_deps/ffmpeg.zip -d /tmp/df_deps/ff_out > /dev/null
-    cp /tmp/df_deps/ff_out/ffmpeg bin/ffmpeg && chmod +x bin/ffmpeg
-    curl -L "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip" -o /tmp/df_deps/ffprobe.zip --progress-bar
-    unzip -o /tmp/df_deps/ffprobe.zip -d /tmp/df_deps/fp_out > /dev/null
-    cp /tmp/df_deps/fp_out/ffprobe bin/ffprobe && chmod +x bin/ffprobe
-    rm -rf /tmp/df_deps
-    ok "FFmpeg downloaded and bundled"
+    download_static_ffmpeg
   fi
 fi
 

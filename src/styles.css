@@ -719,6 +719,7 @@ input[type=checkbox] {
 .badge-purple { background: var(--purple-dim);  border: 1px solid rgba(142,110,232,0.25);          color: #b49bf5; }
 .badge-orange { background: var(--orange-dim);  border: 1px solid rgba(232,146,90,0.25);           color: #f0a870; }
 .badge-red    { background: var(--red-dim);     border: 1px solid rgba(192,57,43,0.3);             color: #e07070; }
+.badge-yellow { background: rgba(255,200,50,0.12); border: 1px solid rgba(255,200,50,0.3);          color: #f5c842; }
 
 /* ── Section Divider ──────────────────────────────────────────────────────── */
 .section-divider {
@@ -1074,24 +1075,45 @@ input[type=checkbox] {
 
 /* ── Light Mode ─────────────────────────────────────────────────────────────── */
 body.light-mode {
-  --bg-base: #f0f2f5;
+  /* Core backgrounds */
+  --bg-base:    #f0f2f5;
+  --bg-raised:  #ffffff;
+  --bg-overlay: #f4f5f7;
+  --bg-sunken:  #eaecef;
+  --bg-input:   #f4f5f7;
+  --bg-active:  rgba(0,0,0,0.06);
+  --bg-hover:   rgba(0,0,0,0.04);
+  /* Aliases used by color picker and other components */
   --bg-surface: #ffffff;
-  --bg-card: #ffffff;
-  --bg-input: #f4f5f7;
-  --bg-hover: #eaecef;
-  --bg-sunken: #eaecef;
-  --border: rgba(0,0,0,0.12);
-  --border-dim: rgba(0,0,0,0.07);
-  --text-primary: #1a1a2e;
+  --bg-card:    #ffffff;
+  /* Borders */
+  --border:        rgba(0,0,0,0.12);
+  --border-dim:    rgba(0,0,0,0.07);
+  --border-mid:    rgba(0,0,0,0.12);
+  --border-bright: rgba(0,0,0,0.20);
+  /* Text */
+  --text-primary:   #1a1a2e;
   --text-secondary: #444466;
-  --text-tertiary: #6e6e8e;
-  --text-dim: #aaa;
-  --gold: #a07820;
-  --gold-bright: #c09030;
-  --gold-dim: rgba(160,120,32,0.12);
-  --red-dim: rgba(192,57,43,0.1);
-  --sidebar-bg: #eaecef;
-  --titlebar-bg: rgba(240,242,245,0.96);
+  --text-tertiary:  #6e6e8e;
+  --text-dim:       #aaa;
+  --text-gold:      #a07820;
+  /* Brand */
+  --gold:       #a07820;
+  --gold-bright:#c09030;
+  --gold-dim:   rgba(160,120,32,0.12);
+  --gold-glow:  rgba(160,120,32,0.1);
+  --red-dim:    rgba(192,57,43,0.1);
+  --green-dim:  rgba(46,204,113,0.12);
+  --blue-dim:   rgba(74,144,226,0.12);
+  --purple-dim: rgba(142,110,232,0.12);
+  --orange-dim: rgba(232,146,90,0.12);
+  /* Shadows */
+  --shadow-sm:  0 1px 3px rgba(0,0,0,0.1);
+  --shadow-md:  0 4px 16px rgba(0,0,0,0.12);
+  --shadow-lg:  0 8px 32px rgba(0,0,0,0.16);
+  /* Legacy aliases */
+  --sidebar-bg:   #eaecef;
+  --titlebar-bg:  rgba(240,242,245,0.96);
   background: #f0f2f5;
   color: #1a1a2e;
 }
@@ -1162,17 +1184,80 @@ body.light-mode .section-label, body.light-mode .sidebar-label { color: #888; }
 body.light-mode .page-header-left .page-title { color: #1a1a2e; }
 body.light-mode .page-header-left .page-subtitle { color: #666; }
 
+/* ── Light Mode: Scrollbars ─────────────────────────────────────────────────── */
+body.light-mode ::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.18); }
+body.light-mode ::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,0.28); }
+
+/* ── Light Mode: Content & Layout ──────────────────────────────────────────── */
+body.light-mode .content { background: #f0f2f5; }
+body.light-mode .main { background: #f0f2f5; }
+
+/* ── Light Mode: Modals ─────────────────────────────────────────────────────── */
+body.light-mode .modal-backdrop { background: rgba(200,204,210,0.85); }
+body.light-mode .modal-box { background: #ffffff !important; border-color: rgba(0,0,0,0.12) !important; box-shadow: 0 8px 40px rgba(0,0,0,0.18) !important; }
+body.light-mode .modal-title { color: #1a1a2e !important; }
+body.light-mode .modal-sub   { color: #444466 !important; }
+body.light-mode .iso-path    { background: #eaecef !important; border-color: rgba(0,0,0,0.1) !important; color: #444466 !important; }
+body.light-mode .ffmpeg-log  { background: #eaecef !important; border-color: rgba(0,0,0,0.1) !important; color: #555577 !important; }
+body.light-mode .step-text.done   { color: #1a1a2e; }
+body.light-mode .step-text.active { color: #a07820; }
+body.light-mode .step-text.wait   { color: #9090a8; }
+body.light-mode .step-indicator.wait { background: #eaecef; border-color: rgba(0,0,0,0.15); color: #6e6e8e; }
+
+/* ── Light Mode: Probe Panel ─────────────────────────────────────────────────── */
+body.light-mode .probe-panel { background: #eaecef !important; border-color: rgba(0,0,0,0.1) !important; }
+body.light-mode .probe-key { color: #6e6e8e !important; }
+body.light-mode .probe-val { color: #a07820 !important; }
+
+/* ── Light Mode: Info Panels ─────────────────────────────────────────────────── */
+body.light-mode .info-panel.red   { background: rgba(192,57,43,0.06) !important; border-color: rgba(192,57,43,0.2) !important; }
+body.light-mode .info-panel.green { background: rgba(46,204,113,0.07) !important; border-color: rgba(46,204,113,0.2) !important; }
+body.light-mode .info-panel.green .info-panel-title { color: #1a8040 !important; }
+body.light-mode .info-panel.red   .info-panel-title { color: #c0392b !important; }
+body.light-mode .info-panel ul li { color: #555 !important; }
+body.light-mode .warn-inline { background: rgba(192,57,43,0.06) !important; border-color: rgba(192,57,43,0.2) !important; color: #c0392b !important; }
+
+/* ── Light Mode: Badges ──────────────────────────────────────────────────────── */
+body.light-mode .badge-green  { color: #1a7040 !important; }
+body.light-mode .badge-blue   { color: #1a5090 !important; }
+body.light-mode .badge-purple { color: #5030a0 !important; }
+body.light-mode .badge-orange { color: #904020 !important; }
+body.light-mode .badge-red    { color: #c0392b !important; }
+body.light-mode .badge-gold   { color: #a07820 !important; }
+
+/* ── Light Mode: Burn button & danger button ────────────────────────────────── */
+body.light-mode .btn-danger { color: #c0392b !important; border-color: rgba(192,57,43,0.3) !important; }
+body.light-mode .btn-danger:hover { background: rgba(192,57,43,0.08) !important; }
+
+/* ── Light Mode: Drive/hint info panels (inline rgba(255,255,255,0.05) → light) */
+body.light-mode [style*="rgba(255,255,255,0.05)"] { background: rgba(0,0,0,0.04) !important; }
+
+/* ── Light Mode: Color picker popup ─────────────────────────────────────────── */
+body.light-mode .color-popup { background: #ffffff !important; border-color: rgba(0,0,0,0.12) !important; box-shadow: 0 8px 32px rgba(0,0,0,0.15) !important; }
+body.light-mode .color-swatch { border-color: rgba(0,0,0,0.18) !important; }
+body.light-mode .color-preset.active { border-color: #333 !important; }
+
+/* ── Light Mode: Menu preview nav buttons ───────────────────────────────────── */
+body.light-mode .menu-preview-wrap { border-color: rgba(0,0,0,0.15) !important; }
+
+/* ── Light Mode: Section divider line ───────────────────────────────────────── */
+body.light-mode .section-divider-line { background: rgba(0,0,0,0.1); }
+body.light-mode .section-divider-sub  { color: #6e6e8e; }
+
+/* ── Light Mode: Tab count badge ────────────────────────────────────────────── */
+body.light-mode .tab-count { background: rgba(160,120,32,0.1) !important; color: #a07820 !important; border-color: rgba(160,120,32,0.25) !important; }
+
 /* ── Persistent Color Picker ──────────────────────────────────────────────── */
 .color-picker-wrap { position: relative; display: flex; gap: 8px; align-items: center; }
 .color-swatch {
-  width: 36px; height: 36px; border-radius: 8px; border: 2px solid var(--border);
+  width: 36px; height: 36px; border-radius: 8px; border: 2px solid var(--border-mid);
   cursor: pointer; flex-shrink: 0; transition: transform 0.15s;
   box-shadow: 0 2px 8px rgba(0,0,0,0.3);
 }
 .color-swatch:hover { transform: scale(1.1); border-color: var(--gold); }
 .color-popup {
   position: absolute; top: calc(100% + 8px); left: 0; z-index: 999;
-  background: var(--bg-card); border: 1px solid var(--border);
+  background: var(--bg-overlay); border: 1px solid var(--border-mid);
   border-radius: 12px; padding: 16px; box-shadow: 0 8px 32px rgba(0,0,0,0.4);
   width: 220px;
 }
@@ -1184,9 +1269,9 @@ body.light-mode .page-header-left .page-subtitle { color: #666; }
   flex-shrink: 0;
 }
 .color-preset:hover { transform: scale(1.15); border-color: var(--text-primary); }
-.color-preset.active { border-color: #fff; transform: scale(1.1); }
+.color-preset.active { border-color: var(--text-primary); transform: scale(1.1); }
 .color-popup input[type=color] {
-  width: 100%; height: 40px; border-radius: 8px; border: 1px solid var(--border);
+  width: 100%; height: 40px; border-radius: 8px; border: 1px solid var(--border-mid);
   cursor: pointer; padding: 2px; background: transparent;
 }
 .color-popup input[type=text] {

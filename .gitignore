@@ -1,6 +1,28 @@
+# Dependencies
 node_modules/
+
+# Build output
 dist/
 out/
+
+# Bundled binaries (too large for git — see README for download links)
+bin/ffmpeg
+bin/ffprobe
+bin/tsMuxeR
+
+# macOS
 .DS_Store
-*.iso
+*.dmg.blockmap
+
+# Logs
 *.log
+disc_forge_log.txt
+
+# Temp/work directories
+discforge_*/
+bdmv_*/
+ts/
+
+# Editor
+.vscode/
+.idea/
