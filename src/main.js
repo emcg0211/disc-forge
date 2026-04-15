@@ -1522,9 +1522,137 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
       });
       tsProc3a.on('close', code => {
         if (code !== 0) {
-          sendLog(`  Step 3a failed (exit ${code}) — skipping text subs, proceeding with PGS only`);
+          sendLog(`  Step 3a failed (exit ${code}) — retrying with source MKV instead of .ts`);
           cleanup(subTempBd);
-          return runMkvmergeAndTsMuxer(pgsSubs);
+
+          // ── Step 3a retry: convert titleTs → .mkv via mkvmerge (stream copy), then feed
+          //    that .mkv to tsMuxeR.  tsMuxeR reads MKV cleanly; audio is already AC3
+          //    from Step 1 so there is no codec mismatch. ──
+          const forsubsMkv = path.join(workDir, `title_${pad(titleIdx)}_forsubs.mkv`);
+          sendLog(`  Step 3a retry: mkvmerge stream-copy ${path.basename(titleTs)} → ${path.basename(forsubsMkv)}`);
+          sendLog(`  mkvmerge: ${[TOOLS.mkvmerge, '-o', forsubsMkv, titleTs].map(a => a.includes(' ') ? `"${a}"` : a).join(' ')}`);
+
+          const mkvConvProc = spawn(TOOLS.mkvmerge, ['-o', forsubsMkv, titleTs]);
+          mkvConvProc.stdout.on('data', d => { const l = d.toString().trim(); if (l) sendLog(l); });
+          mkvConvProc.stderr.on('data', d => { const l = d.toString().trim(); if (l) sendLog(l); });
+          mkvConvProc.on('error', err => {
+            sendLog(`  Step 3a retry mkvmerge error: ${err.message} — skipping text subs, proceeding with PGS only`);
+            runMkvmergeAndTsMuxer(pgsSubs);
+          });
+          mkvConvProc.on('close', mkvConvCode => {
+            if (mkvConvCode !== 0) {
+              sendLog(`  Step 3a retry mkvmerge failed (exit ${mkvConvCode}) — skipping text subs, proceeding with PGS only`);
+              return runMkvmergeAndTsMuxer(pgsSubs);
+            }
+            sendLog(`  Step 3a retry mkvmerge succeeded → ${path.basename(forsubsMkv)}`);
+
+          const subTempBd2 = path.join(workDir, `bdmv_title_${pad(titleIdx)}_subtmp2`);
+          cleanup(subTempBd2);
+          fs.mkdirSync(subTempBd2, { recursive: true });
+
+          // Retry meta: video + audio + SRT subs — audio is AC3 in the .mkv, no mismatch
+          const retryMetaLines = ['MUXOPT --blu-ray --no-pcr-on-video-pid --new-audio-pes'];
+          retryMetaLines.push(`${vCodec}, "${tsPath(forsubsMkv)}", fps=${fps}, track=1`);
+          retryMetaLines.push(`A_AC3, "${tsPath(forsubsMkv)}", track=2`);
+          textSubs.forEach(sub => {
+            const lang   = langCode(sub.language);
+            const forced = sub.isForced ? ', forced' : '';
+            retryMetaLines.push(`S_TEXT/UTF8, "${tsPath(sub.extractedPath)}", lang=${lang}, video-width=${vW}, video-height=${vH}, fps=${fps}, font-name=Arial, font-size=48, font-color=0xFFFFFF, bottom-offset=24${forced}`);
+          });
+
+          const retryMetaFile = path.join(workDir, `tsmuxer_title_${pad(titleIdx)}_subtmp2.meta`);
+          fs.writeFileSync(retryMetaFile, retryMetaLines.join('\n') + '\n');
+          sendLog(`  Step 3a retry: tsMuxeR SRT→PGS using mkvmerge-converted .mkv`);
+          sendLog(`  meta:\n${retryMetaLines.map(l => '    ' + l).join('\n')}`);
+          sendLog(`  tsMuxeR: "${retryMetaFile}" "${subTempBd2}"`);
+
+          const tsProc3aRetry = spawn(TOOLS.tsmuxer, [retryMetaFile, subTempBd2]);
+          tsProc3aRetry.stdout.on('data', d => { const l = d.toString().trim(); if (l) sendLog(l); });
+          tsProc3aRetry.stderr.on('data', d => { const l = d.toString().trim(); if (l) sendLog(l); });
+          tsProc3aRetry.on('error', err => {
+            sendLog(`  Step 3a retry error: ${err.message} — skipping text subs, proceeding with PGS only`);
+            cleanup(subTempBd2);
+            runMkvmergeAndTsMuxer(pgsSubs);
+          });
+          tsProc3aRetry.on('close', retryCode => {
+            if (retryCode !== 0) {
+              sendLog(`  Step 3a retry failed (exit ${retryCode}) — skipping text subs, proceeding with PGS only`);
+              cleanup(subTempBd2);
+              return runMkvmergeAndTsMuxer(pgsSubs);
+            }
+
+            // Retry succeeded — Steps 3b/3c against subTempBd2
+            const findTempM2tsRetry = () => {
+              for (const n of ['00001', '00000']) {
+                const p = path.join(subTempBd2, 'BDMV', 'STREAM', `${n}.m2ts`);
+                if (fs.existsSync(p)) return p;
+              }
+              return null;
+            };
+            const retryTempM2ts = findTempM2tsRetry();
+            if (!retryTempM2ts) {
+              sendLog(`  Step 3a retry 3b: no temp.m2ts found — skipping text subs`);
+              cleanup(subTempBd2);
+              return runMkvmergeAndTsMuxer(pgsSubs);
+            }
+            sendLog(`  Step 3a retry 3b: temp.m2ts: ${path.basename(retryTempM2ts)} (${(fs.statSync(retryTempM2ts).size/1e6).toFixed(1)} MB)`);
+
+            const { execFileSync: execFileSync3aR } = require('child_process');
+            let retrySubStreamCount = 0;
+            try {
+              const probeOut = execFileSync3aR(
+                TOOLS.ffprobe,
+                ['-v', 'quiet', '-select_streams', 's', '-show_entries', 'stream=index', '-of', 'csv=p=0', retryTempM2ts],
+                { encoding: 'utf8', timeout: 15000 }
+              ).trim();
+              retrySubStreamCount = probeOut.split('\n').map(l => l.trim()).filter(l => /^\d+$/.test(l)).length;
+            } catch (err) {
+              sendLog(`  Step 3a retry 3b: ffprobe failed: ${err.message} — skipping text subs`);
+              cleanup(subTempBd2);
+              return runMkvmergeAndTsMuxer(pgsSubs);
+            }
+
+            if (retrySubStreamCount === 0) {
+              sendLog(`  Step 3a retry 3b: no subtitle streams found — skipping text subs`);
+              cleanup(subTempBd2);
+              return runMkvmergeAndTsMuxer(pgsSubs);
+            }
+            sendLog(`  Step 3a retry 3b: found ${retrySubStreamCount} PGS stream(s) in temp.m2ts`);
+
+            const retryExtractedSupFiles = new Array(retrySubStreamCount).fill(null);
+            let retryRemaining3c = retrySubStreamCount;
+
+            for (let n = 0; n < retrySubStreamCount; n++) {
+              const supFile     = path.join(workDir, `sub_pgs_${pad(titleIdx)}_retry_${n}.sup`);
+              const extractArgs = ['-y', '-i', retryTempM2ts, '-map', `0:s:${n}`, '-c:s', 'copy', supFile];
+              sendLog(`  Step 3a retry 3c[${n}]: extract → ${path.basename(supFile)}`);
+              sendLog(`  FFmpeg: ${[TOOLS.ffmpeg, ...extractArgs].map(a => a.includes(' ') ? `"${a}"` : a).join(' ')}`);
+
+              const ff3cRetry = spawn(TOOLS.ffmpeg, extractArgs);
+              let ff3cRetryStderr = '';
+              ff3cRetry.stderr.on('data', d => { ff3cRetryStderr += d.toString(); });
+              ff3cRetry.on('close', code3c => {
+                const exists = fs.existsSync(supFile);
+                const size   = exists ? fs.statSync(supFile).size : 0;
+                if (code3c === 0 && exists && size >= 100) {
+                  sendLog(`  ✓ Step 3a retry 3c[${n}]: ${path.basename(supFile)} (${(size/1024).toFixed(0)} KB)`);
+                  const origSub = textSubs[n] || {};
+                  retryExtractedSupFiles[n] = { ...origSub, format: 'PGS (Blu-ray Native)', extractedPath: supFile };
+                } else {
+                  sendLog(`  Warning: Step 3a retry 3c[${n}]: extraction failed (exit ${code3c}, ${size} bytes) — skipping`);
+                  if (ff3cRetryStderr.trim()) sendLog(`  ffmpeg: ${ff3cRetryStderr.trim().slice(-500)}`);
+                }
+                if (--retryRemaining3c === 0) {
+                  cleanup(subTempBd2);
+                  const allPgsSubs = [...pgsSubs, ...retryExtractedSupFiles.filter(Boolean)];
+                  runMkvmergeAndTsMuxer(allPgsSubs);
+                }
+              });
+            }
+          });
+          return; // prevent fall-through to Step 3b inside mkvConvProc callback
+          }); // close mkvConvProc.on('close', ...)
+          return; // prevent fall-through to Step 3b in if (code !== 0) block
         }
 
         // ── Step 3b: find temp.m2ts and count subtitle streams ───────────────
