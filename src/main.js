@@ -318,17 +318,25 @@ ipcMain.handle('detect-bd-compatibility', async (_, filePath) => {
         const bitrateMbps = parseInt(data.format?.bit_rate || 0) / 1e6;
         const bitrateOk = bitrateMbps < 40 || bitrateMbps === 0;
         const audioOk = aStreams.length === 0 || aStreams.every(s => BD_AUDIO.has(s.codec_name));
-        const compatible = !!(containerOk && videoOk && bitrateOk && audioOk);
+        const videoWidth  = vStream?.width  || 0;
+        const videoHeight = vStream?.height || 0;
+        const resolutionOk = !videoWidth || !videoHeight ||
+          _BD_RES.some(([w,h]) => w===videoWidth && h===videoHeight);
+        const compatible = !!(containerOk && videoOk && bitrateOk && audioOk && resolutionOk);
         const reasons = [];
         if (!videoOk) reasons.push('Video codec needs transcoding');
         if (!bitrateOk) reasons.push(`Bitrate ${bitrateMbps.toFixed(1)} Mbps exceeds BD limit (40 Mbps)`);
         if (!audioOk) reasons.push('Audio codec needs transcoding (e.g. FLAC)');
         if (!containerOk) reasons.push(`Container ${ext} not BD-native`);
+        if (!resolutionOk) reasons.push(`Resolution ${videoWidth}×${videoHeight} needs BD correction`);
         resolve({
           compatible,
           mode: compatible ? 'passthrough' : 'transcode',
           videoCodec: vStream?.codec_name || '',
           bitrateMbps: bitrateMbps.toFixed(1),
+          width: videoWidth,
+          height: videoHeight,
+          resolutionCompliant: resolutionOk,
           reasons,
         });
       } catch (e) {
@@ -391,7 +399,7 @@ ipcMain.handle('burn-iso', async (_, isoPath) => {
       sendLog(`Burn using growisofs: ${deviceNode}`);
       mainWindow.webContents.send('burn-progress', { status: 'burning', message: `Burning to ${deviceNode}...`, percent: 1 });
 
-      const gProc = spawn(TOOLS.growisofs, ['-dvd-compat', '-Z', `${deviceNode}=${isoPath}`]);
+      const gProc = spawn(TOOLS.growisofs, ['-dvd-compat', '-speed=4', '-Z', `${deviceNode}=${isoPath}`]);
       let gStdout = '', gStderr = '';
 
       gProc.stdout.on('data', d => {
@@ -608,20 +616,19 @@ ipcMain.handle('build-disc', async (_, project) => {
       label: 'Updating disc navigation for all titles',
       fn: () => { fixMultiTitleNavigation(bdFolder, 1 + project.titles.length); return Promise.resolve(); }
     }] : []),
+    {
+      label: 'Converting main feature to BD format',
+      fn: () => convertMainFeatureToBd(project, workDir, tsDir, bdFolder),
+      outputFile: () => path.join(bdFolder, 'BDMV', 'STREAM', '00001.m2ts'),
+    },
     { label: 'Packaging ISO image', fn: () => {
       const _path = require('path'), _fs = require('fs');
-      // Force-create BDMV/STREAM and copy main.ts if needed
       const streamDir = _path.join(bdFolder, 'BDMV', 'STREAM');
       _fs.mkdirSync(streamDir, { recursive: true });
       _fs.mkdirSync(_path.join(bdFolder, 'BDMV', 'BACKUP'),  { recursive: true });
       _fs.mkdirSync(_path.join(bdFolder, 'BDMV', 'CLIPINF'), { recursive: true });
       _fs.mkdirSync(_path.join(bdFolder, 'BDMV', 'PLAYLIST'),{ recursive: true });
-      const mainTs = _path.join(tsDir, 'main.ts');
-      const m2ts   = _path.join(streamDir, '00001.m2ts');
-      if (_fs.existsSync(mainTs) && !_fs.existsSync(m2ts)) {
-        _fs.copyFileSync(mainTs, m2ts);
-        sendLog('Copied main.ts → STREAM/00001.m2ts (' + (_fs.statSync(m2ts).size/1e6).toFixed(1) + ' MB)');
-      }
+      patchMainTitlePlaylist(bdFolder);
       const bdmvContents = _fs.readdirSync(_path.join(bdFolder,'BDMV')).join(', ');
       sendLog('BDMV contents: ' + bdmvContents);
       return packageISO(bdFolder, outputDir, discName);
@@ -723,13 +730,44 @@ function muxMainFeature(project, workDir, tsDir) {
     // The tsMuxeR meta codec string must exactly match the elementary stream type in
     // the .ts file — a mismatch causes tsMuxeR to silently produce a near-empty output.
     const mainCrfVal = getCrfValue(project.mainVideo?.videoQuality);
-    if (mainCrfVal) {
-      const level = (project.resolution || '').includes('480p') ? '3.1' : '4.1';
+    const mainIsVtb  = project.mainVideo?.videoQuality === 'videotoolbox';
+    const mainResDims = {
+      '1080p (1920×1080)':  [1920, 1080],
+      '720p (1280×720)':    [1280, 720],
+      '480p (720×480)':     [720,  480],
+      '480p (720×576) PAL': [720,  576],
+      '4K UHD (3840×2160)': [3840, 2160],
+    };
+    const [, mainVH] = mainResDims[project.resolution] || [1920, 1080];
+    const mainSrcRes = detectResolution(mainPath);
+    const mainResCorrTarget = (mainSrcRes.w && mainSrcRes.h) ? getBdCompliantResolution(mainSrcRes.w, mainSrcRes.h) : null;
+    const effectiveMainVH = mainResCorrTarget ? mainResCorrTarget.h : mainVH;
+    const mainResVfStr = mainResCorrTarget
+      ? (mainResCorrTarget.padOnly
+          ? `pad=${mainResCorrTarget.w}:${mainResCorrTarget.h}:(${mainResCorrTarget.w}-${mainSrcRes.w})/2:(${mainResCorrTarget.h}-${mainSrcRes.h})/2`
+          : `scale=${mainResCorrTarget.w}:${mainResCorrTarget.h}`)
+      : null;
+    if (mainIsVtb) {
+      const vtbArgs = getVideoToolboxArgs(effectiveMainVH);
+      args.push('-c:v', 'h264_videotoolbox', ...vtbArgs, '-pix_fmt', 'yuv420p');
+      if (mainResVfStr) args.push('-vf', mainResVfStr);
+      sendLog(`  Video: VideoToolbox H.264 hardware encode (${vtbArgs[1]}, Level ${vtbArgs[vtbArgs.length - 1]})`);
+      if (mainResCorrTarget) sendLog(`  Auto-correcting resolution: ${mainSrcRes.w}×${mainSrcRes.h} → ${mainResCorrTarget.w}×${mainResCorrTarget.h} (${mainResCorrTarget.padOnly ? 'padding' : 'scaling'})`);
+    } else if (mainCrfVal) {
+      const level = effectiveMainVH <= 480 ? '3.1' : '4.1';
       args.push('-c:v', 'libx264', '-crf', String(mainCrfVal), '-preset', 'slow',
                 '-profile:v', 'high', '-level', level, '-pix_fmt', 'yuv420p');
+      if (mainResVfStr) args.push('-vf', mainResVfStr);
       sendLog(`  Video: CRF ${mainCrfVal} (H.264 High Profile, Level ${level})`);
+      if (mainResCorrTarget) sendLog(`  Auto-correcting resolution: ${mainSrcRes.w}×${mainSrcRes.h} → ${mainResCorrTarget.w}×${mainResCorrTarget.h} (${mainResCorrTarget.padOnly ? 'padding' : 'scaling'})`);
       const dur = getVideoDuration(mainPath);
       if (dur > 0) sendLog(`__CRF_START:${Math.round(dur)}`);
+    } else if (mainResVfStr) {
+      const level = effectiveMainVH <= 480 ? '3.1' : '4.1';
+      args.push('-c:v', 'libx264', '-crf', '16', '-preset', 'fast',
+                '-profile:v', 'high', '-level', level, '-pix_fmt', 'yuv420p');
+      args.push('-vf', mainResVfStr);
+      sendLog(`  Auto-correcting resolution: ${mainSrcRes.w}×${mainSrcRes.h} → ${mainResCorrTarget.w}×${mainResCorrTarget.h} (${mainResCorrTarget.padOnly ? 'padding' : 'scaling'}) — near-lossless CRF 16`);
     } else {
       args.push('-c:v', 'copy');
     }
@@ -932,6 +970,162 @@ function writeBdClpi(clipDir, backDir, id) {
   if (backDir) fs.copyFileSync(dest, path.join(backDir, `${id}.clpi`));
 }
 
+function readClpiEndTime(clpiPath) {
+  try {
+    const buf = fs.readFileSync(clpiPath);
+    if (buf.length < 32) return null;
+    // Header offset 8: SequenceInfoStartAddress (4 bytes, big-endian)
+    const seqOff = buf.readUInt32BE(8);
+    // SequenceInfo layout at seqOff:
+    //   +0  length (4)
+    //   +4  reserved (1)
+    //   +5  num_atc_sequences (1)
+    //   +6  ATCSeq[0].spn_atc_start (4)
+    //   +10 ATCSeq[0].num_stc_sequences (1)
+    //   +11 ATCSeq[0].offset_stc_id (1)
+    //   +12 ATCSeq[0].reserved (2)
+    //   +14 STCSeq[0].pcr_pid (2)
+    //   +16 STCSeq[0].spn_stc_start (4)
+    //   +20 STCSeq[0].presentation_start_time (4)
+    //   +24 STCSeq[0].presentation_end_time (4)
+    if (seqOff + 28 > buf.length) return null;
+    return buf.readUInt32BE(seqOff + 24);
+  } catch (e) {
+    sendLog(`readClpiEndTime: ${e.message}`);
+    return null;
+  }
+}
+
+// When tsMuxeR runs with --custom-menu-bg it creates:
+//   STREAM/00000.m2ts — menu stub loop
+//   STREAM/00001.m2ts — main feature
+//   PLAYLIST/00000.mpls — broken (references clip 00000 instead of 00001)
+// Hardware players read 00000.mpls to find the main feature and fail because the
+// clip reference points at the menu stub.  This function patches 00000.mpls with a
+// binary find/replace of the ASCII clip name so it correctly references 00001.m2ts.
+function patchMainTitlePlaylist(bdFolder) {
+  const bdmvDir  = path.join(bdFolder, 'BDMV');
+  const stream01 = path.join(bdmvDir, 'STREAM', '00001.m2ts');
+
+  // Only needed when tsMuxeR produced 00001.m2ts (menu-enabled disc).
+  // Without a menu the main feature is always 00000.m2ts and 00000.mpls already
+  // references it correctly.
+  if (!fs.existsSync(stream01)) {
+    sendLog('patchMainTitlePlaylist: no 00001.m2ts — menu not present, skipping');
+    return;
+  }
+
+  const playDir  = path.join(bdmvDir, 'PLAYLIST');
+  const clipDir  = path.join(bdmvDir, 'CLIPINF');
+  const backDir  = path.join(bdmvDir, 'BACKUP');
+  const mplsPath = path.join(playDir, '00000.mpls');
+
+  // Always overwrite with a freshly constructed MPLS — tsMuxeR may produce a binary
+  // clip reference (no ASCII "00000"), so find/replace is unreliable.
+  // Layout: 58-byte header, PlayList at 58, PlayListMark at 96, total 102 bytes.
+  {
+    // Read the actual presentation_end_time from 00001.clpi so hardware players get
+    // an accurate duration rather than the sentinel 0xFFFFFFFF.
+    const clpi01ForTime = path.join(clipDir, '00001.clpi');
+    const clpiEndTime   = readClpiEndTime(clpi01ForTime);
+    const outTime = (clpiEndTime && clpiEndTime > 0 && clpiEndTime !== 0xFFFFFFFF)
+      ? clpiEndTime : 0xFFFFFFFF;
+    if (clpiEndTime) sendLog(`patchMainTitlePlaylist: OUTtime from CLPI = 0x${outTime.toString(16).toUpperCase()}`);
+
+    // PlayItem body = "00001"(5)+"M2TS"(4)+flags(2)+stcId(1)+IN(4)+OUT(4)+UO(2)+rnd(1)+still(1)+stillTime(1)+numSTN(1) = 26
+    const PLAYLIST_OFFSET      = 58;
+    const PLAY_ITEM_BODY       = 26;
+    const PLAYLIST_BODY        = 6 + 2 + PLAY_ITEM_BODY;  // 34: header(6)+item_len_field(2)+body(26)
+    const PLAYLISTMARK_OFFSET  = PLAYLIST_OFFSET + 4 + PLAYLIST_BODY;  // 96
+    const TOTAL                = PLAYLISTMARK_OFFSET + 6;  // 102: 4-byte length + 2-byte count
+
+    const mpls = Buffer.alloc(TOTAL, 0);
+
+    // Header
+    mpls.write('MPLS', 0, 'ascii');
+    mpls.write('0200', 4, 'ascii');
+    mpls.writeUInt32BE(PLAYLIST_OFFSET,     8);   // AppInfoPlayList offset
+    mpls.writeUInt32BE(PLAYLIST_OFFSET,    12);   // PlayList offset
+    mpls.writeUInt32BE(PLAYLISTMARK_OFFSET, 16);  // PlayListMark offset
+    // offset 20: ExtensionData = 0 (no extension)
+
+    // PlayList
+    let off = PLAYLIST_OFFSET;
+    mpls.writeUInt32BE(PLAYLIST_BODY, off); off += 4;  // length (excludes this field)
+    mpls.writeUInt16BE(0,             off); off += 2;  // reserved
+    mpls.writeUInt16BE(1,             off); off += 2;  // num PlayItems
+    mpls.writeUInt16BE(0,             off); off += 2;  // num SubPaths
+
+    // PlayItem
+    mpls.writeUInt16BE(PLAY_ITEM_BODY, off); off += 2;
+    mpls.write('00001', off, 'ascii');       off += 5;
+    mpls.write('M2TS',  off, 'ascii');       off += 4;
+    mpls.writeUInt16BE(0x8001, off);         off += 2;  // flags
+    mpls.writeUInt8(0,         off);         off += 1;  // StcID
+    mpls.writeUInt32BE(0,       off);         off += 4;  // INtime
+    mpls.writeUInt32BE(outTime, off);         off += 4;  // OUTtime
+    mpls.writeUInt16BE(0,      off);         off += 2;  // UO_mask_table
+    mpls.writeUInt8(0x81,      off);         off += 1;  // random_access_flag
+    mpls.writeUInt8(0,         off);         off += 1;  // still_mode
+    mpls.writeUInt8(0,         off);         off += 1;  // still_time
+    mpls.writeUInt8(0,         off);         off += 1;  // num_STN
+
+    // PlayListMark (empty — no chapter marks)
+    off = PLAYLISTMARK_OFFSET;
+    mpls.writeUInt32BE(2, off); off += 4;  // length = 2 (just the count field)
+    mpls.writeUInt16BE(0, off);            // num_PlayListMarks = 0
+
+    fs.mkdirSync(playDir, { recursive: true });
+    fs.writeFileSync(mplsPath, mpls);
+    if (fs.existsSync(backDir)) {
+      fs.mkdirSync(path.join(backDir, 'PLAYLIST'), { recursive: true });
+      fs.writeFileSync(path.join(backDir, 'PLAYLIST', '00000.mpls'), mpls);
+    }
+    sendLog(`patchMainTitlePlaylist: wrote fresh 00000.mpls (${TOTAL} bytes) referencing clip 00001`);
+  }
+
+  // Patch index.bdmv — tsMuxeR may overwrite it with a version that has IndexTable offset = 0.
+  // Re-read the file and fix bytes 12-15 (IndexTable_start_address) if needed.
+  const idxPath = path.join(bdmvDir, 'index.bdmv');
+  if (fs.existsSync(idxPath)) {
+    const idxBuf = fs.readFileSync(idxPath);
+    const currentIdxOff = idxBuf.readUInt32BE(12);
+    if (currentIdxOff === 0 || currentIdxOff === idxBuf.readUInt32BE(8)) {
+      // Find AppInfoBDMV offset and length to calculate correct IndexTable offset
+      const appInfoOff = idxBuf.readUInt32BE(8);
+      if (appInfoOff > 0 && appInfoOff + 4 < idxBuf.length) {
+        const appInfoLen = idxBuf.readUInt32BE(appInfoOff);
+        const idxTableOff = appInfoOff + 4 + appInfoLen;
+        idxBuf.writeUInt32BE(idxTableOff, 12);
+        fs.writeFileSync(idxPath, idxBuf);
+        const backIdxPath = path.join(backDir, 'index.bdmv');
+        if (fs.existsSync(backIdxPath)) fs.writeFileSync(backIdxPath, idxBuf);
+        sendLog(`patchMainTitlePlaylist: fixed index.bdmv IndexTable offset → ${idxTableOff} (0x${idxTableOff.toString(16)})`);
+      }
+    } else {
+      sendLog(`patchMainTitlePlaylist: index.bdmv IndexTable offset already OK: 0x${currentIdxOff.toString(16)}`);
+    }
+  }
+
+  // Ensure CLIPINF/00001.clpi exists — tsMuxeR should create it alongside 00001.m2ts
+  // but create a fallback if it's missing.
+  const clpi01 = path.join(clipDir, '00001.clpi');
+  if (!fs.existsSync(clpi01)) {
+    const clpi00 = path.join(clipDir, '00000.clpi');
+    if (fs.existsSync(clpi00)) {
+      fs.copyFileSync(clpi00, clpi01);
+      if (fs.existsSync(backDir)) {
+        fs.mkdirSync(path.join(backDir, 'CLIPINF'), { recursive: true });
+        fs.copyFileSync(clpi00, path.join(backDir, 'CLIPINF', '00001.clpi'));
+      }
+      sendLog('patchMainTitlePlaylist: copied 00000.clpi → 00001.clpi');
+    } else {
+      writeBdClpi(clipDir, fs.existsSync(backDir) ? backDir : null, '00001');
+      sendLog('patchMainTitlePlaylist: wrote minimal 00001.clpi');
+    }
+  }
+}
+
 function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleIdx) {
   return new Promise((resolve, reject) => {
     const pad      = n => String(n).padStart(5, '0');
@@ -1062,9 +1256,10 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
       'MPEG-2':     'V_MPEG-2',
     };
     const fps    = getVideoFps(filePath);
-    // CRF re-encode always outputs H.264; override codec string for tsMuxeR meta.
+    // CRF and VideoToolbox re-encode always output H.264; override codec string for tsMuxeR meta.
     const titleCrfVal = getCrfValue(title.videoQuality);
-    const vCodec = titleCrfVal ? 'V_MPEG4/ISO/AVC' : (vCodecMap[project.videoFormat] || 'V_MPEG4/ISO/AVC');
+    const titleIsVtb  = title.videoQuality === 'videotoolbox';
+    const vCodec = (titleCrfVal || titleIsVtb) ? 'V_MPEG4/ISO/AVC' : (vCodecMap[project.videoFormat] || 'V_MPEG4/ISO/AVC');
     const resDims = {
       '1080p (1920×1080)':  [1920, 1080],
       '720p (1280×720)':    [1280, 720],
@@ -1072,7 +1267,12 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
       '480p (720×576) PAL': [720,  576],
       '4K UHD (3840×2160)': [3840, 2160],
     };
-    const [vW, vH] = resDims[project.resolution] || [1920, 1080];
+    const srcRes = detectResolution(filePath);
+    const resCorrTarget = (srcRes.w && srcRes.h) ? getBdCompliantResolution(srcRes.w, srcRes.h) : null;
+    // Use corrected dims for subtitle meta so tsMuxeR renders at output resolution
+    const [vW, vH] = resCorrTarget
+      ? [resCorrTarget.w, resCorrTarget.h]
+      : (resDims[project.resolution] || [1920, 1080]);
 
     // Stream title tags from the source file, used for tsMuxeR track-name= fields.
     const streamTitles = getStreamTitles(filePath);
@@ -1163,12 +1363,28 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
       // ── Step 1: FFmpeg → .ts ─────────────────────────────────────────────
       const ffArgs = ['-y', '-i', filePath];
 
-      // Build video codec args: CRF re-encode or stream-copy
-      const h264Level = vH <= 480 ? '3.1' : '4.1';
+      const resVfStr = resCorrTarget
+        ? (resCorrTarget.padOnly
+            ? `pad=${resCorrTarget.w}:${resCorrTarget.h}:(${resCorrTarget.w}-${srcRes.w})/2:(${resCorrTarget.h}-${srcRes.h})/2`
+            : `scale=${resCorrTarget.w}:${resCorrTarget.h}`)
+        : null;
+
+      // Build video codec args: CRF re-encode, VideoToolbox, or stream-copy
       const addVideoCodecArgs = (args) => {
-        if (titleCrfVal) {
+        if (titleIsVtb) {
+          const vtbArgs = getVideoToolboxArgs(vH);
+          args.push('-c:v', 'h264_videotoolbox', ...vtbArgs, '-pix_fmt', 'yuv420p');
+          if (resVfStr) args.push('-vf', resVfStr);
+        } else if (titleCrfVal) {
+          const h264Level = vH <= 480 ? '3.1' : '4.1';
           args.push('-c:v', 'libx264', '-crf', String(titleCrfVal), '-preset', 'slow',
                     '-profile:v', 'high', '-level', h264Level, '-pix_fmt', 'yuv420p');
+          if (resVfStr) args.push('-vf', resVfStr);
+        } else if (resVfStr) {
+          const level = vH <= 480 ? '3.1' : '4.1';
+          args.push('-c:v', 'libx264', '-crf', '16', '-preset', 'fast',
+                    '-profile:v', 'high', '-level', level, '-pix_fmt', 'yuv420p');
+          args.push('-vf', resVfStr);
         } else {
           args.push('-c:v', 'copy');
         }
@@ -1192,10 +1408,18 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
       }
       ffArgs.push('-f', 'mpegts', '-mpegts_flags', 'system_b', titleTs);
 
-      if (titleCrfVal) {
+      if (titleIsVtb) {
+        const vtbLevel = getVideoToolboxArgs(vH);
+        sendLog(`  Video: VideoToolbox H.264 hardware encode (${vtbLevel[1]}, Level ${vtbLevel[vtbLevel.length - 1]})`);
+        if (resCorrTarget) sendLog(`  Auto-correcting resolution: ${srcRes.w}×${srcRes.h} → ${resCorrTarget.w}×${resCorrTarget.h} (${resCorrTarget.padOnly ? 'padding' : 'scaling'})`);
+      } else if (titleCrfVal) {
+        const h264Level = vH <= 480 ? '3.1' : '4.1';
         sendLog(`  Video: CRF ${titleCrfVal} (H.264 High Profile, Level ${h264Level})`);
+        if (resCorrTarget) sendLog(`  Auto-correcting resolution: ${srcRes.w}×${srcRes.h} → ${resCorrTarget.w}×${resCorrTarget.h} (${resCorrTarget.padOnly ? 'padding' : 'scaling'})`);
         const dur = getVideoDuration(filePath);
         if (dur > 0) sendLog(`__CRF_START:${Math.round(dur)}`);
+      } else if (resCorrTarget) {
+        sendLog(`  Auto-correcting resolution: ${srcRes.w}×${srcRes.h} → ${resCorrTarget.w}×${resCorrTarget.h} (${resCorrTarget.padOnly ? 'padding' : 'scaling'}) — near-lossless CRF 16`);
       }
 
       sendLog(`  Step 1: FFmpeg → ${path.basename(titleTs)}`);
@@ -1748,9 +1972,9 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
       sendLog(`  tsMuxeR not found — FFmpeg-only path`);
       return runFfmpegPipeline();
     }
-    if (titleCrfVal) {
-      // CRF re-encode: must go through FFmpeg — tsMuxeR direct cannot re-encode
-      sendLog(`  CRF ${title.videoQuality}: skipping tsMuxeR direct → FFmpeg pipeline`);
+    if (needsFfmpegPipeline(title.videoQuality)) {
+      // CRF and VideoToolbox re-encode: must go through FFmpeg — tsMuxeR direct cannot re-encode
+      sendLog(`  ${title.videoQuality}: skipping tsMuxeR direct → FFmpeg pipeline`);
       return runFfmpegPipeline();
     }
     runTsMuxerDirectMkv();
@@ -1793,6 +2017,50 @@ function getVideoDuration(filePath) {
 const CRF_VALUES = { crf18: 18, crf20: 20, crf23: 23 };
 function getCrfValue(videoQuality) {
   return CRF_VALUES[videoQuality] || null;
+}
+
+// ── Helper: does this quality mode require the FFmpeg pipeline? ───────────────
+// Passthrough is the only mode that bypasses FFmpeg — all re-encode modes
+// (CRF and VideoToolbox) must go through the FFmpeg pipeline.
+function needsFfmpegPipeline(videoQuality) {
+  return videoQuality && videoQuality !== 'passthrough';
+}
+
+// ── Helper: VideoToolbox bitrate args for a given resolution ─────────────────
+function getVideoToolboxArgs(vH) {
+  if (vH <= 480) return ['-b:v', '8000k',  '-profile:v', 'high', '-level', '3.1'];
+  if (vH <= 720) return ['-b:v', '15000k', '-profile:v', 'high', '-level', '4.0'];
+  return               ['-b:v', '20000k', '-profile:v', 'high', '-level', '4.1'];
+}
+
+// ── Helper: get actual video dimensions via ffprobe ───────────────────────────
+function detectResolution(filePath) {
+  if (!TOOLS.ffprobe || !filePath) return { w: 0, h: 0 };
+  try {
+    const { execFileSync } = require('child_process');
+    const out = execFileSync(
+      TOOLS.ffprobe,
+      ['-v','quiet','-select_streams','v:0','-show_entries','stream=width,height','-of','csv=p=0', filePath],
+      { encoding:'utf8', timeout:10000 }
+    ).trim().split('\n')[0].trim();
+    const parts = out.split(',').map(Number);
+    if (parts.length >= 2 && parts[0] && parts[1]) return { w: parts[0], h: parts[1] };
+  } catch (_) {}
+  return { w: 0, h: 0 };
+}
+
+// ── Helper: find nearest BD-compliant resolution ──────────────────────────────
+// Returns null if already compliant, or { w, h, padOnly } for the target.
+// padOnly=true  → pad with black bars (SD, aspect preserved)
+// padOnly=false → scale to target (aspect already matches)
+const _BD_RES = [[1920,1080],[1280,720],[720,480],[720,576],[3840,2160]];
+function getBdCompliantResolution(width, height) {
+  if (_BD_RES.some(([w,h]) => w===width && h===height)) return null;
+  if (height >= 464 && height <= 496 && width <= 720) return { w:720, h:480, padOnly:true };
+  if (height >= 560 && height <= 592 && width <= 720) return { w:720, h:576, padOnly:true };
+  if (height >= 700 && height <= 760) return { w:1280, h:720, padOnly:false };
+  if (height >= 900 && height <= 1100) return { w:1920, h:1080, padOnly:false };
+  return { w:1920, h:1080, padOnly:false };
 }
 
 // ── Helper: stream title tags via ffprobe ─────────────────────────────────────
@@ -1865,7 +2133,8 @@ function writeTsMuxerMeta(project, workDir, tsDir, bdFolder, isPassthrough) {
     'MPEG-2':     'V_MPEG-2',
   };
   const mainCrfForMeta = getCrfValue(project.mainVideo?.videoQuality);
-  const vCodec = mainCrfForMeta ? 'V_MPEG4/ISO/AVC' : (vCodecMap[project.videoFormat] || 'V_MPEG4/ISO/AVC');
+  const mainVtbForMeta = project.mainVideo?.videoQuality === 'videotoolbox';
+  const vCodec = (mainCrfForMeta || mainVtbForMeta) ? 'V_MPEG4/ISO/AVC' : (vCodecMap[project.videoFormat] || 'V_MPEG4/ISO/AVC');
   const resDims = {
     '1080p (1920×1080)':  [1920, 1080],
     '720p (1280×720)':    [1280, 720],
@@ -1873,7 +2142,13 @@ function writeTsMuxerMeta(project, workDir, tsDir, bdFolder, isPassthrough) {
     '480p (720×576) PAL': [720,  576],
     '4K UHD (3840×2160)': [3840, 2160],
   };
-  const [subVW, subVH] = resDims[project.resolution] || [1920, 1080];
+  const mainSrcResForMeta = detectResolution(project.mainVideo?.path || '');
+  const mainResCorrForMeta = (mainSrcResForMeta.w && mainSrcResForMeta.h)
+    ? getBdCompliantResolution(mainSrcResForMeta.w, mainSrcResForMeta.h)
+    : null;
+  const [subVW, subVH] = mainResCorrForMeta
+    ? [mainResCorrForMeta.w, mainResCorrForMeta.h]
+    : (resDims[project.resolution] || [1920, 1080]);
   const fps = getVideoFps(project.mainVideo?.path);
   lines.push(`${vCodec}, "${tsPath(mainTs)}", fps=${fps}, insertSEI, contSPS, track=1`);
 
@@ -2060,6 +2335,145 @@ function runTsMuxer(workDir, bdFolder) {
   });
 }
 
+// ── Second tsMuxeR pass: convert main.ts → 192-byte BD m2ts ──────────────────
+// FFmpeg outputs 188-byte MPEG-TS.  Running tsMuxeR on a container-swapped MKV
+// produces a proper 192-byte BD stream that hardware players require.
+
+function convertMainFeatureToBd(project, workDir, tsDir, bdFolder) {
+  return new Promise((resolve, reject) => {
+    const mainTs     = path.join(tsDir, 'main.ts');
+    const mainBdMkv  = path.join(workDir, 'main_bd.mkv');
+    const tempBdMain = path.join(workDir, 'bdmv_main_bd');
+    const streamDir  = path.join(bdFolder, 'BDMV', 'STREAM');
+    const clipDir    = path.join(bdFolder, 'BDMV', 'CLIPINF');
+
+    if (!fs.existsSync(mainTs)) {
+      sendLog('convertMainFeatureToBd: main.ts not found — skipping');
+      return resolve();
+    }
+    if (!TOOLS.mkvmerge) {
+      sendLog('convertMainFeatureToBd: mkvmerge not found — skipping (00001.m2ts may be 188-byte)');
+      return resolve();
+    }
+    if (!TOOLS.tsmuxer) {
+      sendLog('convertMainFeatureToBd: tsMuxeR not found — skipping');
+      return resolve();
+    }
+
+    // Step 1: mkvmerge container-swap main.ts → main_bd.mkv
+    sendLog(`Converting main feature to BD format: mkvmerge → main_bd.mkv`);
+    const mkv = spawn(TOOLS.mkvmerge, ['-o', mainBdMkv, mainTs]);
+    mkv.stdout.on('data', d => { const l = d.toString().trim(); if (l) sendLog(l); });
+    mkv.stderr.on('data', d => { const l = d.toString().trim(); if (l) sendLog(l); });
+    mkv.on('error', err => reject(new Error(`mkvmerge error in main BD conversion: ${err.message}`)));
+    mkv.on('close', code => {
+      // mkvmerge exits 1 for warnings (still produces output)
+      if (code !== 0 && code !== 1) {
+        return reject(new Error(`mkvmerge exited ${code} during main feature BD conversion`));
+      }
+      if (!fs.existsSync(mainBdMkv)) {
+        return reject(new Error(`mkvmerge did not produce main_bd.mkv`));
+      }
+      sendLog(`  main_bd.mkv: ${(fs.statSync(mainBdMkv).size / 1e6).toFixed(1)} MB`);
+      runTsMuxerPass();
+    });
+
+    // Step 2: write tsMuxeR meta and produce 192-byte BD stream
+    const runTsMuxerPass = () => {
+      const vCodecMap = {
+        'H.264 AVC':  'V_MPEG4/ISO/AVC',
+        'H.265 HEVC': 'V_MPEGH/ISO/HEVC',
+        'VC-1':       'V_MS/VFW/WVC1',
+        'MPEG-2':     'V_MPEG-2',
+      };
+      const mainCrf = getCrfValue(project.mainVideo?.videoQuality);
+      const mainVtb = project.mainVideo?.videoQuality === 'videotoolbox';
+      const vCodec  = (mainCrf || mainVtb)
+        ? 'V_MPEG4/ISO/AVC'
+        : (vCodecMap[project.videoFormat] || 'V_MPEG4/ISO/AVC');
+      const fps = getVideoFps(project.mainVideo?.path);
+
+      const aCodecMap = {
+        'DTS-HD Master Audio': 'A_DTS',
+        'Dolby TrueHD':        'A_AC3',
+        'PCM 5.1':             'A_AC3',
+        'PCM 7.1':             'A_AC3',
+        'LPCM Stereo':         'A_AC3',
+        'Dolby Digital 5.1':   'A_AC3',
+        'DTS 5.1':             'A_DTS',
+      };
+
+      const mainPath = project.mainVideo?.path || '';
+      const mainFeatureAudio = [
+        ...project.audioTracks.filter(t => t.file?.path === mainPath && (t.trackIndex ?? t.streamIndex) != null),
+        ...project.audioTracks.filter(t => (t.trackIndex ?? t.streamIndex) == null),
+      ];
+
+      const metaLines = ['MUXOPT --blu-ray --no-pcr-on-video-pid --new-audio-pes'];
+      metaLines.push(`${vCodec}, "${tsPath(mainBdMkv)}", fps=${fps}, insertSEI, contSPS, track=1`);
+      mainFeatureAudio.forEach((track, i) => {
+        const codec = aCodecMap[track.format] || 'A_AC3';
+        const lang  = langCode(track.language);
+        metaLines.push(`${codec}, "${tsPath(mainBdMkv)}", lang=${lang}, track=${i + 2}`);
+      });
+
+      const metaFile = path.join(workDir, 'tsmuxer_main_bd.meta');
+      fs.writeFileSync(metaFile, metaLines.join('\n') + '\n');
+      sendLog(`  meta:\n${metaLines.map(l => '    ' + l).join('\n')}`);
+
+      cleanup(tempBdMain);
+      fs.mkdirSync(tempBdMain, { recursive: true });
+      sendLog(`  Running: tsMuxeR "${metaFile}" "${tempBdMain}"`);
+
+      const proc = spawn(TOOLS.tsmuxer, [metaFile, tempBdMain]);
+      proc.stdout.on('data', d => { const l = d.toString().trim(); if (l) sendLog(l); });
+      proc.stderr.on('data', d => { const l = d.toString().trim(); if (l) sendLog(l); });
+      proc.on('error', err => {
+        cleanup(tempBdMain);
+        reject(new Error(`tsMuxeR error in main BD conversion: ${err.message}`));
+      });
+      proc.on('close', code => {
+        if (code !== 0) {
+          cleanup(tempBdMain);
+          return reject(new Error(`tsMuxeR exited ${code} during main feature BD conversion`));
+        }
+        mergeMainBd();
+      });
+    };
+
+    // Step 3: copy resulting stream and clip info into the final BD folder
+    const mergeMainBd = () => {
+      const tempBdmv  = path.join(tempBdMain, 'BDMV');
+      const srcStream = path.join(tempBdmv, 'STREAM',  '00000.m2ts');
+      const srcClip   = path.join(tempBdmv, 'CLIPINF', '00000.clpi');
+      const destStream = path.join(streamDir, '00001.m2ts');
+      const destClip   = path.join(clipDir,   '00001.clpi');
+      const backDir    = path.join(bdFolder, 'BDMV', 'BACKUP');
+
+      if (!fs.existsSync(srcStream)) {
+        cleanup(tempBdMain);
+        return reject(new Error('tsMuxeR produced no stream during main feature BD conversion'));
+      }
+
+      fs.mkdirSync(streamDir, { recursive: true });
+      fs.mkdirSync(clipDir,   { recursive: true });
+
+      fs.copyFileSync(srcStream, destStream);
+      sendLog(`  STREAM/00001.m2ts: ${(fs.statSync(destStream).size / 1e6).toFixed(1)} MB [192-byte BD format]`);
+
+      fs.copyFileSync(srcClip, destClip);
+      if (fs.existsSync(backDir)) {
+        fs.mkdirSync(path.join(backDir, 'CLIPINF'), { recursive: true });
+        fs.copyFileSync(srcClip, path.join(backDir, 'CLIPINF', '00001.clpi'));
+      }
+      sendLog(`  CLIPINF/00001.clpi copied`);
+
+      cleanup(tempBdMain);
+      resolve();
+    };
+  });
+}
+
 // ── Fallback BDMV (when tsMuxeR is absent) ───────────────────────────────────
 // Writes valid-enough binary navigation files for software player compatibility.
 
@@ -2079,13 +2493,18 @@ function writeFallbackBDMV(workDir, bdFolder) {
     sendLog(`Created dir: ${d}`);
   }
 
-  // Copy main.ts → 00001.m2ts
-  if (fs.existsSync(mainTs)) {
-    const dest = path.join(streamDir, '00001.m2ts');
-    fs.copyFileSync(mainTs, dest);
-    sendLog(`Copied main.ts → ${dest} (${(fs.statSync(dest).size/1e6).toFixed(1)} MB)`);
+  // Copy main feature → 00001.m2ts
+  // Prefer tsMuxeR's 00000.m2ts output (192-byte BD format) over main.ts (188-byte MPEG-TS)
+  const tsmOut = path.join(streamDir, '00000.m2ts');
+  const dest01 = path.join(streamDir, '00001.m2ts');
+  if (fs.existsSync(tsmOut) && fs.statSync(tsmOut).size > 10e6) {
+    fs.copyFileSync(tsmOut, dest01);
+    sendLog(`Copied tsMuxeR 00000.m2ts → 00001.m2ts (${(fs.statSync(dest01).size/1e6).toFixed(1)} MB) [BD-compliant 192-byte]`);
+  } else if (fs.existsSync(mainTs)) {
+    fs.copyFileSync(mainTs, dest01);
+    sendLog(`Warning: using main.ts → 00001.m2ts (188-byte fallback, may not play on hardware)`);
   } else {
-    sendLog(`WARNING: main.ts not found at ${mainTs}`);
+    sendLog(`WARNING: neither tsMuxeR output nor main.ts found`);
   }
 
   // Minimal valid index.bdmv (INDX0100)
@@ -2094,7 +2513,7 @@ function writeFallbackBDMV(workDir, bdFolder) {
   indexBuf.write('INDX', 0, 'ascii');
   indexBuf.write('0100', 4, 'ascii');
   indexBuf.writeUInt32BE(112, 8);   // size
-  indexBuf.writeUInt32BE(56, 12);   // AppInfoBDMV offset
+  indexBuf.writeUInt32BE(96, 12);   // IndexTable_start_address (AppInfoBDMV_offset(56) + 4 + AppInfoBDMV_length(36))
   indexBuf.writeUInt32BE(96, 16);   // IndexTable offset
   // FirstPlayback object ref (type=1=HDMV, id_ref=0)
   indexBuf[56] = 0x01;              // type = HDMV
@@ -2216,7 +2635,7 @@ function fixMultiTitleNavigation(bdFolder, titleCount) {
   idx.write('INDX', 0, 'ascii');
   idx.write('0100', 4, 'ascii');
   idx.writeUInt32BE(indexSize, 8);
-  idx.writeUInt32BE(56, 12); // AppInfoBDMV_start
+  idx.writeUInt32BE(96, 12); // IndexTable_start_address (AppInfoBDMV_offset(56) + 4 + AppInfoBDMV_length(36))
   idx.writeUInt32BE(96, 16); // IndexTable_start
   // AppInfoBDMV: FirstPlayback → Object 0
   idx[56] = 0x01;            // object_type = HDMV
