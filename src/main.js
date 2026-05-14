@@ -94,16 +94,68 @@ const TOOLS = {
   tsmuxer:  findTool(['tsMuxeR', 'tsmuxer', 'tsMuxerNG', 'tsMuxeR-ng']),
   mkvmerge: findTool(['mkvmerge']),
   makemkv:  findTool(['makemkvcon', 'MakeMKV']),
-  hdiutil:  '/usr/bin/hdiutil',
-  growisofs: findTool(['growisofs']),
+  hdiutil:   '/usr/bin/hdiutil',
+  xorriso:   findTool(['/opt/homebrew/bin/xorriso', 'xorriso']),
+  mkisofs:   findTool(['/opt/homebrew/bin/mkisofs', 'mkisofs']),
 };
 
 // Friendly install instructions per tool
 const TOOL_INSTALL = {
-  ffmpeg:  'Install via Homebrew: brew install ffmpeg',
-  ffprobe: 'Install via Homebrew: brew install ffmpeg (includes ffprobe)',
-  tsmuxer: 'Download from github.com/justdan96/tsMuxeR or brew install --cask tsmuxer',
+  ffmpeg:   'Install via Homebrew: brew install ffmpeg',
+  ffprobe:  'Install via Homebrew: brew install ffmpeg (includes ffprobe)',
+  tsmuxer:  'Download from github.com/justdan96/tsMuxeR or brew install --cask tsmuxer',
+  mkvmerge: 'Install via Homebrew: brew install mkvtoolnix',
+  xorriso:  'Install via Homebrew: brew install xorriso',
 };
+
+// ── ISO tool auto-detection ───────────────────────────────────────────────────
+// Tested once at startup. packageISO() uses this — no per-build detection.
+let bestIsoMethod = null; // 'xorriso-udf250' | 'xorriso-native' | null (xorriso unavailable)
+
+async function probeIsoMethod() {
+  const { execFile } = require('child_process');
+  const tmpDir = path.join(os.tmpdir(), `discforge_isocheck_${Date.now()}`);
+  try { fs.mkdirSync(tmpDir, { recursive: true }); fs.writeFileSync(path.join(tmpDir, 'test.txt'), 'test'); } catch(_) {}
+  const tmpIso = path.join(os.tmpdir(), `discforge_isocheck_${Date.now()}.iso`);
+  const rmTmp = () => {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch(_) {}
+    try { if (fs.existsSync(tmpIso)) fs.unlinkSync(tmpIso); } catch(_) {}
+  };
+
+  if (TOOLS.xorriso) {
+    const ok = await new Promise(resolve => {
+      execFile(TOOLS.xorriso, ['-as', 'mkisofs', '-udf', '-udfver', '2.50', '-V', 'TEST', '-o', tmpIso, tmpDir],
+        { timeout: 20000, maxBuffer: 1024 * 1024 }, err => resolve(!err));
+    });
+    rmTmp();
+    if (ok) {
+      bestIsoMethod = 'xorriso-udf250';
+      console.log('[ISO] xorriso UDF 2.50: SUPPORTED');
+    } else {
+      // UDF 2.50 failed — try xorriso native mode as fallback
+      const tmpDir2 = path.join(os.tmpdir(), `discforge_isocheck2_${Date.now()}`);
+      const tmpIso2 = path.join(os.tmpdir(), `discforge_isocheck2_${Date.now()}.iso`);
+      try { fs.mkdirSync(tmpDir2, { recursive: true }); fs.writeFileSync(path.join(tmpDir2, 'test.txt'), 'test'); } catch(_) {}
+      const okNative = await new Promise(resolve => {
+        execFile(TOOLS.xorriso, ['-outdev', `stdio:${tmpIso2}`, '-map', tmpDir2, '/', '-commit'],
+          { timeout: 20000 }, err => resolve(!err));
+      });
+      try { fs.rmSync(tmpDir2, { recursive: true, force: true }); } catch(_) {}
+      try { if (fs.existsSync(tmpIso2)) fs.unlinkSync(tmpIso2); } catch(_) {}
+      if (okNative) {
+        bestIsoMethod = 'xorriso-native';
+        console.log('[ISO] xorriso native: SUPPORTED');
+      } else {
+        bestIsoMethod = null;
+        console.log('[ISO] xorriso UDF 2.50: NOT AVAILABLE — install with: brew install xorriso');
+      }
+    }
+  } else {
+    rmTmp();
+    bestIsoMethod = null;
+    console.log('[ISO] xorriso UDF 2.50: NOT AVAILABLE — install with: brew install xorriso');
+  }
+}
 
 // ── Window ────────────────────────────────────────────────────────────────────
 
@@ -137,8 +189,9 @@ function createWindow() {
   if (process.argv.includes('--dev')) mainWindow.webContents.openDevTools({ mode: 'detach' });
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   createWindow();
+  probeIsoMethod(); // non-blocking — result stored in bestIsoMethod
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -167,10 +220,12 @@ app.whenReady().then(() => {
 });
 
 ipcMain.handle('check-tools', async () => ({
-  ffmpeg:  { found: !!TOOLS.ffmpeg,  path: TOOLS.ffmpeg  },
-  ffprobe: { found: !!TOOLS.ffprobe, path: TOOLS.ffprobe },
-  tsmuxer: { found: !!TOOLS.tsmuxer, path: TOOLS.tsmuxer },
-  makemkv: { found: !!TOOLS.makemkv, path: TOOLS.makemkv },
+  ffmpeg:   { found: !!TOOLS.ffmpeg,    path: TOOLS.ffmpeg,   install: TOOL_INSTALL.ffmpeg   },
+  ffprobe:  { found: !!TOOLS.ffprobe,   path: TOOLS.ffprobe,  install: TOOL_INSTALL.ffprobe  },
+  tsmuxer:  { found: !!TOOLS.tsmuxer,   path: TOOLS.tsmuxer,  install: TOOL_INSTALL.tsmuxer  },
+  mkvmerge: { found: !!TOOLS.mkvmerge,  path: TOOLS.mkvmerge, install: TOOL_INSTALL.mkvmerge },
+  xorriso:  { found: !!TOOLS.xorriso,   path: TOOLS.xorriso,  install: TOOL_INSTALL.xorriso  },
+  makemkv:  { found: !!TOOLS.makemkv,   path: TOOLS.makemkv  },
 }));
 
 // ── IPC: dialogs ──────────────────────────────────────────────────────────────
@@ -294,7 +349,7 @@ ipcMain.handle('detect-drives', async () => {
   return { drives, discStatus, deviceNode };
 });
 
-// ── IPC: detect BD compatibility (passthrough mode) ───────────────────────────
+// ── IPC: detect BD source properties (resolution, codec, bitrate) ─────────────
 
 ipcMain.handle('detect-bd-compatibility', async (_, filePath) => {
   if (!TOOLS.ffprobe || !filePath) return { compatible: false, mode: 'transcode' };
@@ -310,7 +365,7 @@ ipcMain.handle('detect-bd-compatibility', async (_, filePath) => {
         const streams = data.streams || [];
         const vStream = streams.find(s => s.codec_type === 'video');
         const aStreams = streams.filter(s => s.codec_type === 'audio');
-        const BD_VIDEO = new Set(['h264', 'hevc', 'vc1', 'mpeg2video']);
+        const BD_VIDEO = new Set(['h264', 'vc1', 'mpeg2video']);
         const BD_AUDIO = new Set(['ac3', 'eac3', 'dts', 'truehd', 'pcm_s16le', 'pcm_s24le', 'dca', 'mlp']);
         const ext = path.extname(filePath).toLowerCase();
         const containerOk = ['.mkv', '.m2ts', '.ts'].includes(ext);
@@ -331,7 +386,7 @@ ipcMain.handle('detect-bd-compatibility', async (_, filePath) => {
         if (!resolutionOk) reasons.push(`Resolution ${videoWidth}×${videoHeight} needs BD correction`);
         resolve({
           compatible,
-          mode: compatible ? 'passthrough' : 'transcode',
+          mode: 'transcode',
           videoCodec: vStream?.codec_name || '',
           bitrateMbps: bitrateMbps.toFixed(1),
           width: videoWidth,
@@ -372,7 +427,7 @@ ipcMain.handle('generate-chapter-thumbnail', async (_, filePath, timecode, outpu
 });
 
 ipcMain.handle('burn-iso', async (_, isoPath) => {
-  return new Promise(async (resolve) => {
+  return new Promise((resolve) => {
     if (!fs.existsSync(isoPath)) {
       return resolve({ error: `ISO file not found: ${isoPath}` });
     }
@@ -380,102 +435,55 @@ ipcMain.handle('burn-iso', async (_, isoPath) => {
     sendLog(`Starting burn: ${isoPath}`);
     mainWindow.webContents.send('burn-progress', { status: 'starting', message: 'Preparing to burn...', percent: 0 });
 
-    // Try growisofs first (better progress reporting), fall back to hdiutil
-    if (TOOLS.growisofs) {
-      // Detect device node
-      let deviceNode = '/dev/rdisk2'; // fallback guess
-      try {
-        const { execSync } = require('child_process');
-        const diskOut = execSync('diskutil list 2>/dev/null', { encoding: 'utf8', timeout: 8000 });
-        const lines = diskOut.split('\n');
-        for (const line of lines) {
-          if (/optical|cd[- ]rom|dvd|bd[- ]/i.test(line)) {
-            const m = line.match(/\/dev\/disk(\d+)/);
-            if (m) { deviceNode = `/dev/rdisk${m[1]}`; break; }
-          }
-        }
-      } catch (_) {}
+    const proc = spawn('/usr/bin/hdiutil', ['burn', isoPath]);
+    let stdout = '', stderr = '';
+    let dotCount = 0;
 
-      sendLog(`Burn using growisofs: ${deviceNode}`);
-      mainWindow.webContents.send('burn-progress', { status: 'burning', message: `Burning to ${deviceNode}...`, percent: 1 });
-
-      const gProc = spawn(TOOLS.growisofs, ['-dvd-compat', '-speed=4', '-Z', `${deviceNode}=${isoPath}`]);
-      let gStdout = '', gStderr = '';
-
-      gProc.stdout.on('data', d => {
-        const line = d.toString().trim();
-        gStdout += line + '\n';
-        sendLog('growisofs: ' + line);
-        // Parse percentage: growisofs outputs "1.33% done, estimate finish..."
-        const pct = line.match(/([\d.]+)%\s+done/);
-        const percent = pct ? parseFloat(pct[1]) : null;
-        mainWindow.webContents.send('burn-progress', { status: 'burning', message: line, percent });
-      });
-      gProc.stderr.on('data', d => {
-        const line = d.toString().trim();
-        gStderr += line + '\n';
-        sendLog('growisofs err: ' + line);
-        const pct = line.match(/([\d.]+)%\s+done/);
-        const percent = pct ? parseFloat(pct[1]) : null;
-        mainWindow.webContents.send('burn-progress', { status: 'burning', message: line, percent });
-      });
-
-      gProc.on('close', code => {
-        if (code === 0) {
-          sendLog('✓ Burn complete (growisofs)');
-          mainWindow.webContents.send('burn-progress', { status: 'done', message: 'Burn complete! Disc ejected.', percent: 100 });
-          resolve({ success: true });
+    const handleLine = (line, isErr) => {
+      sendLog((isErr ? 'burn err: ' : 'burn: ') + line);
+      if (/Writing track/i.test(line)) {
+        mainWindow.webContents.send('burn-progress', { status: 'burning', message: line, percent: null });
+      } else if (/Burn completed successfully/i.test(line)) {
+        // handled in close
+      } else {
+        const dots = (line.match(/\./g) || []).length;
+        if (dots > 0) {
+          dotCount += dots;
+          const percent = Math.min(99, Math.round((dotCount / 200) * 100));
+          mainWindow.webContents.send('burn-progress', { status: 'burning', message: line, percent });
         } else {
-          sendLog(`growisofs failed (${code}), trying hdiutil fallback`);
-          runHdiutilBurn(isoPath, resolve);
+          mainWindow.webContents.send('burn-progress', { status: 'burning', message: line, percent: null });
         }
-      });
-      gProc.on('error', () => {
-        sendLog('growisofs spawn error — trying hdiutil fallback');
-        runHdiutilBurn(isoPath, resolve);
-      });
-      return;
-    }
+      }
+    };
 
-    // No growisofs — use hdiutil
-    runHdiutilBurn(isoPath, resolve);
+    proc.stdout.on('data', d => {
+      const text = d.toString();
+      stdout += text;
+      text.split('\n').map(l => l.trim()).filter(Boolean).forEach(l => handleLine(l, false));
+    });
+    proc.stderr.on('data', d => {
+      const text = d.toString();
+      stderr += text;
+      text.split('\n').map(l => l.trim()).filter(Boolean).forEach(l => handleLine(l, true));
+    });
+
+    proc.on('close', code => {
+      const combined = stdout + stderr;
+      if (code === 0 || /Burn completed successfully/i.test(combined)) {
+        sendLog('✓ Burn complete');
+        mainWindow.webContents.send('burn-progress', { status: 'done', message: 'Burn complete! Disc ejected.', percent: 100 });
+        resolve({ success: true });
+      } else {
+        const msg = stderr.trim() || stdout.trim() || `hdiutil burn exited with code ${code}`;
+        sendLog('Burn failed: ' + msg);
+        mainWindow.webContents.send('burn-progress', { status: 'error', message: msg });
+        resolve({ error: msg });
+      }
+    });
+    proc.on('error', err => resolve({ error: 'hdiutil error: ' + err.message }));
   });
 });
-
-function runHdiutilBurn(isoPath, resolve) {
-  sendLog(`Burning with hdiutil: ${isoPath}`);
-  mainWindow.webContents.send('burn-progress', { status: 'burning', message: 'Burning with hdiutil...', percent: 5 });
-
-  const proc = spawn('/usr/bin/hdiutil', ['burn', isoPath, '-eject']);
-  let stdout = '', stderr = '';
-
-  proc.stdout.on('data', d => {
-    const line = d.toString().trim();
-    stdout += line + '\n';
-    sendLog('burn: ' + line);
-    mainWindow.webContents.send('burn-progress', { status: 'burning', message: line, percent: null });
-  });
-  proc.stderr.on('data', d => {
-    const line = d.toString().trim();
-    stderr += line + '\n';
-    sendLog('burn err: ' + line);
-    mainWindow.webContents.send('burn-progress', { status: 'burning', message: line, percent: null });
-  });
-
-  proc.on('close', code => {
-    if (code === 0) {
-      sendLog('✓ Burn complete (hdiutil)');
-      mainWindow.webContents.send('burn-progress', { status: 'done', message: 'Burn complete! Disc ejected.', percent: 100 });
-      resolve({ success: true });
-    } else {
-      const msg = stderr || stdout || `hdiutil burn exited with code ${code}`;
-      sendLog('Burn failed: ' + msg);
-      mainWindow.webContents.send('burn-progress', { status: 'error', message: msg });
-      resolve({ error: msg });
-    }
-  });
-  proc.on('error', err => resolve({ error: 'hdiutil error: ' + err.message }));
-}
 
 
 ipcMain.handle('save-project-file', async (_, json) => {
@@ -526,7 +534,18 @@ ipcMain.handle('probe-file', async (_, filePath) => {
 // ── IPC: build ────────────────────────────────────────────────────────────────
 
 ipcMain.handle('build-disc', async (_, project) => {
+  project.forceSafeBluRayOutput = true;
+  project.passThroughMode = false;
+  project.forceTranscode = true;
   if (!TOOLS.ffmpeg) return { error: 'FFmpeg not found.\n\nInstall with:\n  brew install ffmpeg' };
+
+  // ── Pre-build diagnostic logging (permanent — do not remove) ─────────────────
+  const _diag = project._diagEmbedded || [];
+  sendLog(`[BUILD DIAG] renderer embeddedTracks: ${_diag.length}`);
+  _diag.forEach((t, i) => sendLog(`[BUILD DIAG] embedded[${i}]: role="${t.role}" included=${t.included} src="${t.sourceFile}"`));
+  sendLog(`[BUILD DIAG] audioTracks received: ${(project.audioTracks||[]).length}`);
+  (project.audioTracks||[]).forEach((t, i) => sendLog(`[BUILD DIAG] audio[${i}]: file="${t.file?.path}" trackIdx=${t.trackIndex ?? t.streamIndex} embedded=${t.embedded||false}`));
+  delete project._diagEmbedded;
 
   // Defensive defaults — guard against malformed or partially-loaded projects
   project.audioTracks    = project.audioTracks    || [];
@@ -535,8 +554,38 @@ ipcMain.handle('build-disc', async (_, project) => {
   project.extras         = project.extras         || [];
   project.titles         = project.titles         || [];
 
-  // ── Passthrough mode: skip FFmpeg mux when source is already BD-compatible ──
-  const isPassthrough = project.passThroughMode === true && project.forceTranscode !== true;
+  if (project.forceSafeBluRayOutput) {
+    sendLog('Blu-ray safe: skipping menu/extras/additional titles');
+    project.extras = [];
+    project.titles = [];
+  }
+
+  // ── Source video probing: map to a valid BD-Video format via selectHwResAndFps ──
+  if (project.mainVideo?.path) {
+    const srcCodec = getVideoCodec(project.mainVideo.path);
+    const srcRes   = detectResolution(project.mainVideo.path);
+    const srcFps   = parseFloat(getVideoFps(project.mainVideo.path));
+    const vfrInfo  = detectVfr(project.mainVideo.path);
+
+    // Always map source FPS to one of the three valid BD-Video formats
+    const bdTarget = selectHwResAndFps(srcFps, srcRes.h);
+    project._safeOutputW      = bdTarget.w;
+    project._safeOutputH      = bdTarget.h;
+    project._safeOutputFpsNum = bdTarget.fps;
+    project._safeOutputFps    = getBdFpsFraction(bdTarget.fps);
+
+    project._srcVideoCodec = srcCodec;
+    project._srcRes        = srcRes;
+    project._srcFps        = srcFps;
+    project._srcVfr        = vfrInfo.isVfr;
+
+    sendLog(`Source: ${srcCodec} ${srcRes.w}×${srcRes.h} @ ${srcFps.toFixed(3)} fps${vfrInfo.isVfr ? ' (VFR)' : ''}`);
+    sendLog(`BD target: ${bdTarget.resolution} @ ${project._safeOutputFps} fps — libx264 Blu-ray-safe`);
+    if (vfrInfo.isVfr) sendLog('Variable frame rate detected — will convert to CFR');
+
+    // tsMuxeR meta always declares the output codec; H.264 for all re-encodes
+    project.videoFormat = 'H.264 AVC';
+  }
 
   const homeDir   = os.homedir();
   const rawOutput = project.outputDir || '';
@@ -584,54 +633,40 @@ ipcMain.handle('build-disc', async (_, project) => {
 
   progress(0, 'Preparing workspace');
 
-  const additionalTitleSteps = (project.titles || []).map((title, i) => ({
-    label: `Processing title ${i + 2}: ${(title.label || title.file?.name || 'Title').slice(0, 40)}`,
-    fn:    () => processAdditionalTitle(project, workDir, tsDir, bdFolder, title, i + 2),
-    outputFile: () => path.join(bdFolder, 'BDMV', 'STREAM', String(i + 2).padStart(5, '0') + '.m2ts'),
-  }));
-
   const isoPath = path.join(outputDir, `${discName}.iso`);
 
   const steps = [
-    ...(isPassthrough ? [
-      { label: 'Passthrough mode — skipping FFmpeg mux (BD-compatible source)',
-        fn: () => { sendLog('Passthrough: skipping FFmpeg mux step'); return Promise.resolve(); } },
-    ] : [
-      { label: 'Muxing main feature audio tracks',  fn: () => muxMainFeature(project, workDir, tsDir),
-        outputFile: () => path.join(tsDir, 'main.ts') },
-      { label: 'Validating mux output',             fn: () => validateMuxOutput(tsDir) },
-    ]),
-    { label: 'Generating menu image',             fn: () => generateMenuImage(project, workDir) },
+    { label: 'Muxing main feature audio tracks',  fn: () => muxMainFeature(project, workDir, tsDir),
+      outputFile: () => path.join(tsDir, 'main.ts') },
+    { label: 'Validating mux output',             fn: () => validateMuxOutput(tsDir) },
+    { label: 'Preparing main feature',            fn: () => prepareMainFeature(workDir, tsDir),
+      outputFile: () => path.join(workDir, 'main_bd.mkv') },
     { label: 'Building Blu-ray disc structure',   fn: () => buildBDStructure(project, workDir, tsDir, bdFolder) },
     ...(project.extras.length > 0
       ? [{ label: 'Processing special features', fn: () => muxExtras(project, workDir, tsDir) }]
       : []),
-    { label: 'Writing tsMuxeR project file',      fn: () => writeTsMuxerMeta(project, workDir, tsDir, bdFolder, isPassthrough) },
+    { label: 'Writing tsMuxeR project file',      fn: () => writeTsMuxerMeta(project, workDir, tsDir, bdFolder) },
     { label: 'Running tsMuxeR / building BDMV',   fn: () => runTsMuxer(workDir, bdFolder),
       outputFile: () => path.join(bdFolder, 'BDMV', 'STREAM', '00001.m2ts') },
-    // Additional titles run AFTER runTsMuxer so tsMuxeR cannot overwrite their
-    // 00002.m2ts / 00002.clpi / 00002.mpls files when it writes the main title.
-    ...additionalTitleSteps,
-    ...(project.titles.length > 0 ? [{
-      label: 'Updating disc navigation for all titles',
-      fn: () => { fixMultiTitleNavigation(bdFolder, 1 + project.titles.length); return Promise.resolve(); }
-    }] : []),
-    {
-      label: 'Converting main feature to BD format',
-      fn: () => convertMainFeatureToBd(project, workDir, tsDir, bdFolder),
-      outputFile: () => path.join(bdFolder, 'BDMV', 'STREAM', '00001.m2ts'),
-    },
-    { label: 'Packaging ISO image', fn: () => {
+    { label: 'Patching playlist and navigation', fn: () => {
       const _path = require('path'), _fs = require('fs');
-      const streamDir = _path.join(bdFolder, 'BDMV', 'STREAM');
-      _fs.mkdirSync(streamDir, { recursive: true });
-      _fs.mkdirSync(_path.join(bdFolder, 'BDMV', 'BACKUP'),  { recursive: true });
-      _fs.mkdirSync(_path.join(bdFolder, 'BDMV', 'CLIPINF'), { recursive: true });
-      _fs.mkdirSync(_path.join(bdFolder, 'BDMV', 'PLAYLIST'),{ recursive: true });
-      patchMainTitlePlaylist(bdFolder);
+      _fs.mkdirSync(_path.join(bdFolder, 'BDMV', 'STREAM'),   { recursive: true });
+      _fs.mkdirSync(_path.join(bdFolder, 'BDMV', 'BACKUP'),   { recursive: true });
+      _fs.mkdirSync(_path.join(bdFolder, 'BDMV', 'CLIPINF'),  { recursive: true });
+      _fs.mkdirSync(_path.join(bdFolder, 'BDMV', 'PLAYLIST'), { recursive: true });
+      patchMainTitlePlaylist(bdFolder, project.forceSafeBluRayOutput);
+      return Promise.resolve();
+    } },
+    ...(project.forceSafeBluRayOutput ? [{
+      label: 'Pre-burn validation',
+      fn: () => validateHwBuild(project, workDir, bdFolder),
+    }] : []),
+    { label: 'Packaging ISO image', fn: async () => {
+      const _path = require('path'), _fs = require('fs');
       const bdmvContents = _fs.readdirSync(_path.join(bdFolder,'BDMV')).join(', ');
       sendLog('BDMV contents: ' + bdmvContents);
-      return packageISO(bdFolder, outputDir, discName);
+      const isoResult = await packageISO(bdFolder, outputDir, discName);
+      project._isoUsedUdf250 = isoResult && isoResult.usedUdf250;
     }, outputFile: () => isoPath },
   ];
 
@@ -657,6 +692,14 @@ ipcMain.handle('build-disc', async (_, project) => {
   }
 
   cleanup(workDir);
+  sendLog('────────────────────────────────────────');
+  sendLog('Build complete.');
+  sendLog('Disc structure validated.');
+  sendLog('Video: libx264 Blu-ray-safe.');
+  sendLog('Audio: AC3 640k.');
+  sendLog('ISO: UDF 2.50 via xorriso.');
+  sendLog('Recommended: burn to BD-RE first for testing.');
+  sendLog('────────────────────────────────────────');
   const isoSize = fs.existsSync(isoPath) ? fs.statSync(isoPath).size : 0;
   mainWindow.webContents.send('build-progress', { done: true, isoPath, isoSize });
   return { success: true, isoPath };
@@ -678,12 +721,36 @@ function muxMainFeature(project, workDir, tsDir) {
     if (!project.mainVideo?.path) return reject(new Error('No main video file specified.'));
     const mainPath = project.mainVideo.path;
 
+    // Dedup audio tracks by sourceFile+streamIndex — belt-and-suspenders against
+    // triple-adding when multiple episodes were probed and renderer sent all of them.
+    {
+      const seen = new Set();
+      project.audioTracks = project.audioTracks.filter(t => {
+        const key = `${t.file?.path || ''}:${t.trackIndex ?? t.streamIndex ?? ''}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    }
+
     // ── Group audio tracks: those inside the main MKV vs standalone external files ──
-    // Tracks with trackIndex != null and file.path !== mainPath are embedded in OTHER
-    // title files (additional episodes). They must NOT be included here — they are
-    // processed by processAdditionalTitle for their own MPEG-TS file.
-    const audioFromMkv  = project.audioTracks.filter(t => t.file?.path === mainPath && (t.trackIndex ?? t.streamIndex) != null);
+    // Use a denylist (exclude known additional-title paths) instead of an allowlist
+    // (require exact match to mainPath). The allowlist silently drops all audio when
+    // paths differ due to symlinks or normalization differences on macOS.
+    const additionalTitlePaths = new Set((project.titles || []).map(t => t.file?.path).filter(Boolean));
+    sendLog(`  muxMainFeature: project.audioTracks.length=${project.audioTracks.length}, mainPath="${mainPath}"`);
+    sendLog(`  muxMainFeature: additionalTitlePaths=[${[...additionalTitlePaths].join('|')}]`);
+    project.audioTracks.forEach((t, i) => {
+      sendLog(`    audioTrack[${i}]: file.path="${t.file?.path}", trackIndex=${t.trackIndex ?? t.streamIndex}, format="${t.format}"`);
+    });
+    // Embedded tracks: have a stream index AND are not from an additional-title file.
+    const audioFromMkv  = project.audioTracks.filter(t =>
+      (t.trackIndex ?? t.streamIndex) != null &&
+      !(t.file?.path && additionalTitlePaths.has(t.file.path))
+    );
+    // Standalone external audio: no stream index — added as a separate FFmpeg input.
     const audioExternal = project.audioTracks.filter(t => (t.trackIndex ?? t.streamIndex) == null);
+    sendLog(`  muxMainFeature: ${project.audioTracks.length} total audio tracks → ${audioFromMkv.length} embedded, ${audioExternal.length} external`);
 
     // Subtitles are NOT routed through FFmpeg:
     //   - MPEG-TS does not support text subtitle codecs (subrip, ASS) — FFmpeg errors out.
@@ -724,62 +791,97 @@ function muxMainFeature(project, workDir, tsDir) {
 
     const allAudio = [...audioFromMkv, ...audioExternal];
 
-    // ── Codecs — video: stream-copy or CRF re-encode; audio: stream-copy or AC3 ──
-    // MPEG-TS stream-copy:  DTS / DTS-HD (core extracted by FFmpeg), AC3
-    // Transcode to AC3:     FLAC, LPCM, TrueHD, AAC — not natively MPEG-TS compatible
+    // ── Codecs — video: libx264 BD-safe; audio: AC3 640k ─────────────────────────
     // The tsMuxeR meta codec string must exactly match the elementary stream type in
     // the .ts file — a mismatch causes tsMuxeR to silently produce a near-empty output.
     const mainCrfVal = getCrfValue(project.mainVideo?.videoQuality);
-    const mainIsVtb  = project.mainVideo?.videoQuality === 'videotoolbox';
     const mainResDims = {
       '1080p (1920×1080)':  [1920, 1080],
       '720p (1280×720)':    [1280, 720],
       '480p (720×480)':     [720,  480],
       '480p (720×576) PAL': [720,  576],
-      '4K UHD (3840×2160)': [3840, 2160],
     };
     const [, mainVH] = mainResDims[project.resolution] || [1920, 1080];
     const mainSrcRes = detectResolution(mainPath);
-    const mainResCorrTarget = (mainSrcRes.w && mainSrcRes.h) ? getBdCompliantResolution(mainSrcRes.w, mainSrcRes.h) : null;
-    const effectiveMainVH = mainResCorrTarget ? mainResCorrTarget.h : mainVH;
-    const mainResVfStr = mainResCorrTarget
+    let mainResCorrTarget = (mainSrcRes.w && mainSrcRes.h) ? getBdCompliantResolution(mainSrcRes.w, mainSrcRes.h) : null;
+
+    let effectiveMainVH = mainResCorrTarget ? mainResCorrTarget.h : mainVH;
+    let mainResVfStr = mainResCorrTarget
       ? (mainResCorrTarget.padOnly
           ? `pad=${mainResCorrTarget.w}:${mainResCorrTarget.h}:(${mainResCorrTarget.w}-${mainSrcRes.w})/2:(${mainResCorrTarget.h}-${mainSrcRes.h})/2`
           : `scale=${mainResCorrTarget.w}:${mainResCorrTarget.h}`)
       : null;
-    if (mainIsVtb) {
-      const vtbArgs = getVideoToolboxArgs(effectiveMainVH);
-      args.push('-c:v', 'h264_videotoolbox', ...vtbArgs, '-pix_fmt', 'yuv420p');
-      if (mainResVfStr) args.push('-vf', mainResVfStr);
-      sendLog(`  Video: VideoToolbox H.264 hardware encode (${vtbArgs[1]}, Level ${vtbArgs[vtbArgs.length - 1]})`);
-      if (mainResCorrTarget) sendLog(`  Auto-correcting resolution: ${mainSrcRes.w}×${mainSrcRes.h} → ${mainResCorrTarget.w}×${mainResCorrTarget.h} (${mainResCorrTarget.padOnly ? 'padding' : 'scaling'})`);
-    } else if (mainCrfVal) {
-      const level = effectiveMainVH <= 480 ? '3.1' : '4.1';
-      args.push('-c:v', 'libx264', '-crf', String(mainCrfVal), '-preset', 'slow',
-                '-profile:v', 'high', '-level', level, '-pix_fmt', 'yuv420p');
-      if (mainResVfStr) args.push('-vf', mainResVfStr);
-      sendLog(`  Video: CRF ${mainCrfVal} (H.264 High Profile, Level ${level})`);
-      if (mainResCorrTarget) sendLog(`  Auto-correcting resolution: ${mainSrcRes.w}×${mainSrcRes.h} → ${mainResCorrTarget.w}×${mainResCorrTarget.h} (${mainResCorrTarget.padOnly ? 'padding' : 'scaling'})`);
+
+    // ── Video codec selection ──────────────────────────────────────────────────
+    // forceSafeBluRayOutput always wins — CRF is a size/quality option within the safe path
+    if (project.forceSafeBluRayOutput) {
+      const safeH    = project._safeOutputH || (mainResCorrTarget ? mainResCorrTarget.h : (mainSrcRes.h || effectiveMainVH));
+      const safeW    = project._safeOutputW || (mainResCorrTarget ? mainResCorrTarget.w : (mainSrcRes.w || 1920));
+      const safeFps  = project._safeOutputFps;
+      const level    = safeH <= 480 ? '3.1' : safeH <= 720 ? '4.0' : '4.1';
+      const maxrateK = safeH <= 720 ? '15000k' : '25000k';
+      const bufsizeK = safeH <= 720 ? '20000k' : '30000k';
+      const gopSize  = Math.round(project._safeOutputFpsNum || project._srcFps || 24);
+      const is1080p  = safeH > 720;
+      const qual     = project.mainVideo?.videoQuality;
+      if (project.fastEncode) {
+        const bitrateK = qual === 'crf18' ? (is1080p ? '20000k' : '12000k')
+                       : qual === 'crf23' ? (is1080p ? '10000k' : '6000k')
+                       : (is1080p ? '15000k' : '8000k');
+        args.push(
+          '-c:v', 'h264_videotoolbox',
+          '-realtime', '0',
+          '-profile:v', 'high',
+          '-level', level,
+          '-pix_fmt', 'yuv420p',
+          '-g', String(gopSize),
+          '-keyint_min', String(gopSize),
+          '-sc_threshold', '0',
+          '-bf', '3',
+          '-refs', '4',
+          '-b:v', bitrateK, '-maxrate', maxrateK, '-bufsize', bufsizeK,
+        );
+        sendLog(`Video: h264_videotoolbox (experimental fast encode) ${bitrateK} L${level} g=${gopSize}`);
+      } else {
+        const crfVal = qual === 'crf18' ? '18' : qual === 'crf23' ? '23' : '20';
+        args.push(
+          '-c:v', 'libx264',
+          '-preset', 'slow',
+          '-profile:v', 'high',
+          '-level', level,
+          '-pix_fmt', 'yuv420p',
+          '-crf', crfVal,
+          '-g', String(gopSize),
+          '-keyint_min', String(gopSize),
+          '-sc_threshold', '0',
+          '-bf', '3',
+          '-refs', '4',
+          '-maxrate', maxrateK, '-bufsize', bufsizeK,
+        );
+        sendLog(`Video: libx264 Blu-ray-safe CRF${crfVal} L${level} g=${gopSize}`);
+      }
+      // Scale + FPS filter: always target the BD-safe output dimensions and FPS
+      const safeFilters = [];
+      const needsScale = mainSrcRes.w !== safeW || mainSrcRes.h !== safeH;
+      if (needsScale) safeFilters.push(`scale=${safeW}:${safeH}:force_original_aspect_ratio=decrease,pad=${safeW}:${safeH}:(ow-iw)/2:(oh-ih)/2`);
+      if (safeFps) safeFilters.push(`fps=${safeFps}`);
+      if (safeFilters.length > 0) args.push('-vf', safeFilters.join(','));
+      if (needsScale) sendLog(`  ${mainSrcRes.w}×${mainSrcRes.h} → ${safeW}×${safeH}`);
+      if (safeFps) sendLog(`  fps=${safeFps}`);
       const dur = getVideoDuration(mainPath);
       if (dur > 0) sendLog(`__CRF_START:${Math.round(dur)}`);
-    } else if (mainResVfStr) {
-      const level = effectiveMainVH <= 480 ? '3.1' : '4.1';
-      args.push('-c:v', 'libx264', '-crf', '16', '-preset', 'fast',
-                '-profile:v', 'high', '-level', level, '-pix_fmt', 'yuv420p');
-      args.push('-vf', mainResVfStr);
-      sendLog(`  Auto-correcting resolution: ${mainSrcRes.w}×${mainSrcRes.h} → ${mainResCorrTarget.w}×${mainResCorrTarget.h} (${mainResCorrTarget.padOnly ? 'padding' : 'scaling'}) — near-lossless CRF 16`);
-    } else {
-      args.push('-c:v', 'copy');
     }
 
-    const MAIN_STREAM_COPY_FORMATS = new Set(['DTS-HD Master Audio', 'Dolby Digital 5.1']);
+    // ── Audio codec selection ──────────────────────────────────────────────────
     allAudio.forEach((track, i) => {
-      if (MAIN_STREAM_COPY_FORMATS.has(track.format)) {
-        args.push(`-c:a:${i}`, 'copy');                       // DTS/AC3 → stream-copy
-      } else {
-        args.push(`-c:a:${i}`, 'ac3', `-b:a:${i}`, '640k');  // FLAC/LPCM/TrueHD/AAC → AC3
-      }
+      const fmt   = track.format || '';
+      const codec = track.codec  || '';
+      args.push(`-c:a:${i}`, 'ac3', `-b:a:${i}`, '640k');
+      sendLog(`Audio track ${i + 1}: AC3 640k (Blu-ray safe) [was: ${fmt || codec || 'unknown'}]`);
     });
+    if (allAudio.length === 0) {
+      sendLog('Audio: no audio tracks — continuing without audio');
+    }
 
     // ── Metadata: language tags ──
     allAudio.forEach((t, i) => {
@@ -801,6 +903,7 @@ function muxMainFeature(project, workDir, tsDir) {
 
 function generateMenuImage(project, workDir) {
   return new Promise((resolve) => {
+    sendLog('generateMenuImage called, ffmpeg=' + !!TOOLS.ffmpeg + ' menuConfig=' + JSON.stringify(project.menuConfig?.theme));
     if (!TOOLS.ffmpeg) return resolve();
 
     const m = project.menuConfig;
@@ -833,7 +936,6 @@ function generateMenuImage(project, workDir) {
           'scale=1920:1080:force_original_aspect_ratio=decrease',
           'pad=1920:1080:(ow-iw)/2:(oh-ih)/2',
           `drawtext=text='${title}':fontsize=72:fontcolor=#${fg}:x=(w-text_w)/2:y=200:shadowcolor=black:shadowx=2:shadowy=2`,
-          `drawtext=text='▶ PLAY    CHAPTERS    AUDIO    SUBTITLES':fontsize=30:fontcolor=#${acc}:x=(w-text_w)/2:y=320`,
         ].join(','),
         '-frames:v', '1', menuPng,
       ]);
@@ -850,18 +952,12 @@ function generateMenuImage(project, workDir) {
         // Gradient overlay
         `drawbox=x=0:y=0:w=iw:h=ih:color=#000000@0.3:t=fill`,
         // Title
-        `drawtext=text='${title}':fontsize=80:fontcolor=#${fg}:x=(w-text_w)/2:y=(h/2)-120:font=serif:shadowcolor=black:shadowx=3:shadowy=3`,
-        // Divider line
-        `drawbox=x=(iw/2-300):y=(ih/2):w=600:h=2:color=#${acc}@0.8:t=fill`,
-        // Menu items
-        `drawtext=text='▶  PLAY':fontsize=32:fontcolor=#${acc}:x=(w/2)-300:y=(h/2)+30`,
-        `drawtext=text='≡  CHAPTERS':fontsize=32:fontcolor=#${acc}:x=(w/2)-80:y=(h/2)+30`,
-        `drawtext=text='🔊  AUDIO':fontsize=32:fontcolor=#${acc}:x=(w/2)+160:y=(h/2)+30`,
+        `drawtext=text='${title}':fontsize=80:fontcolor=#${fg}:x=(w-text_w)/2:y=(h/2)-60:font=serif:shadowcolor=black:shadowx=3:shadowy=3`,
       ].join(','),
       '-frames:v', '1', menuPng,
     ]);
-    proc.on('close', () => resolve()); // non-fatal if this fails
-    proc.on('error', () => resolve());
+    proc.on('close', (code) => { sendLog('generateMenuImage: FFmpeg exit code=' + code + ' png=' + require('fs').existsSync(menuPng)); resolve(); });
+    proc.on('error', (err) => { sendLog('generateMenuImage: FFmpeg error=' + err.message); resolve(); });
   });
 }
 
@@ -938,37 +1034,6 @@ function muxExtras(project, workDir, tsDir) {
 //
 // Last resort: if Step 3 also fails, copy the .ts as .m2ts (no subtitles).
 
-// ── Minimal BDMV navigation file writers ─────────────────────────────────────
-// Used by processAdditionalTitle and fixMultiTitleNavigation to ensure every
-// title has a valid .mpls and .clpi.
-
-function writeBdMpls(playDir, backDir, id) {
-  const mpls = Buffer.alloc(96, 0);
-  mpls.write('MPLS', 0, 'ascii');
-  mpls.write('0200', 4, 'ascii');
-  mpls.writeUInt32BE(96, 8);
-  mpls.writeUInt32BE(58, 12);        // PlayList offset
-  mpls.writeUInt32BE(82, 16);        // PlayListMark offset
-  mpls.writeUInt16BE(1, 58);         // num_PlayItems = 1
-  mpls.writeUInt16BE(0, 60);         // num_SubPaths = 0
-  mpls.write(id, 62, 'ascii');       // clip_Information_file_name (e.g. "00002")
-  mpls.write('M2TS', 67, 'ascii');   // clip_codec_identifier
-  mpls.writeUInt32BE(0, 73);         // IN_time
-  mpls.writeUInt32BE(0xFFFFFF, 77);  // OUT_time
-  const dest = path.join(playDir, `${id}.mpls`);
-  fs.writeFileSync(dest, mpls);
-  if (backDir) fs.copyFileSync(dest, path.join(backDir, `${id}.mpls`));
-}
-
-function writeBdClpi(clipDir, backDir, id) {
-  const clpi = Buffer.alloc(88, 0);
-  clpi.write('HDMV', 0, 'ascii');
-  clpi.write('0200', 4, 'ascii');
-  clpi.writeUInt32BE(88, 8);
-  const dest = path.join(clipDir, `${id}.clpi`);
-  fs.writeFileSync(dest, clpi);
-  if (backDir) fs.copyFileSync(dest, path.join(backDir, `${id}.clpi`));
-}
 
 function readClpiEndTime(clpiPath) {
   try {
@@ -988,145 +1053,214 @@ function readClpiEndTime(clpiPath) {
     //   +16 STCSeq[0].spn_stc_start (4)
     //   +20 STCSeq[0].presentation_start_time (4)
     //   +24 STCSeq[0].presentation_end_time (4)
-    if (seqOff + 28 > buf.length) return null;
-    return buf.readUInt32BE(seqOff + 24);
+    if (seqOff + 26 > buf.length) return null;
+    const endTime = buf.readUInt32BE(seqOff + 22);
+    if (endTime === 0 || endTime > 0x20000000) return null;
+    return endTime;
   } catch (e) {
     sendLog(`readClpiEndTime: ${e.message}`);
     return null;
   }
 }
 
+// After processAdditionalTitle completes for all extra titles, register them
+// in the disc navigation so hardware players can access them.
+//
+// tsMuxeR produces MovieObject.bdmv with 3 objects for a single-title disc:
+//   obj[0]: first-play setup — chains to obj[2]
+//   obj[1]: chapter/menu handler — plays playlist 1 (tsMuxeR internal use)
+//   obj[2]: main player — PlayPL(0) plays playlist 00000.mpls
+//
+// Additional titles use playlists 00002.mpls, 00003.mpls, ... (titleIdx values).
+// For each additional title N, we:
+//   1. Clone obj[2] and change its PlayPL target to N → new obj[3+i]
+//   2. Add a TitleSearchTable entry in index.bdmv pointing to the new object
+//
+// PlayPL opcode: 0x21810000 (w0), playlist-index (w1), 0 (w2) — verified empirically.
+// TitleInfo entry: 0x40 (HDMV movie), 0x00, ref_high, ref_low — 4 bytes, big-endian.
+// Index.bdmv: tsMuxeR pre-allocates 28 bytes (7 slots) after NumberOfTitles=0,
+//   so up to 7 additional titles fit without extending the file.
+function fixMultiTitleNavigation(bdFolder, numAdditionalTitles) {
+  if (numAdditionalTitles === 0) return;
+
+  const mobjPath  = path.join(bdFolder, 'BDMV', 'MovieObject.bdmv');
+  const indexPath = path.join(bdFolder, 'BDMV', 'index.bdmv');
+  const backDir   = path.join(bdFolder, 'BDMV', 'BACKUP');
+
+  if (!fs.existsSync(mobjPath) || !fs.existsSync(indexPath)) {
+    sendLog('fixMultiTitleNavigation: navigation files not found — skipping');
+    return;
+  }
+
+  // ── 1. MovieObject.bdmv: add PlayPL(N) objects for each additional title ──
+  const mobjBuf = Buffer.from(fs.readFileSync(mobjPath));
+
+  // MovieObjects struct at offset 40: Length(4) + reserved(4) + num_objs(2) + objects
+  const MOBJ_STRUCT_OFF = 40;
+  const NUM_OBJS_OFF    = 48;
+
+  const mobjLength = mobjBuf.readUInt32BE(MOBJ_STRUCT_OFF);
+  const numObjs    = mobjBuf.readUInt16BE(NUM_OBJS_OFF);
+
+  // Find MovieObject[2]: the main player (5 cmds, last = PlayPL(0))
+  let pos = NUM_OBJS_OFF + 2;
+  let templateObjBytes = null;
+  for (let i = 0; i < numObjs; i++) {
+    const numCmds = mobjBuf.readUInt16BE(pos + 2);
+    const objSize = 4 + numCmds * 12;
+    if (i === 2) templateObjBytes = mobjBuf.slice(pos, pos + objSize);
+    pos += objSize;
+  }
+
+  if (!templateObjBytes) {
+    sendLog(`fixMultiTitleNavigation: expected ≥3 movie objects, found ${numObjs} — skipping`);
+    return;
+  }
+
+  const tmplNumCmds = templateObjBytes.readUInt16BE(2);
+  const lastCmdOff  = 4 + (tmplNumCmds - 1) * 12;
+  const playPlW0    = templateObjBytes.readUInt32BE(lastCmdOff);
+  const playPlW1    = templateObjBytes.readUInt32BE(lastCmdOff + 4);
+
+  if (playPlW0 !== 0x21810000 || playPlW1 !== 0) {
+    sendLog(`fixMultiTitleNavigation: template obj[2] last cmd unexpected (w0=0x${playPlW0.toString(16)} w1=${playPlW1}) — skipping`);
+    return;
+  }
+
+  const newObjBufs = [];
+  for (let i = 0; i < numAdditionalTitles; i++) {
+    const playlistId = i + 2;  // additional titles use playlists 2, 3, 4, …
+    const newObj = Buffer.from(templateObjBytes);
+    newObj.writeUInt32BE(playlistId, lastCmdOff + 4);
+    newObjBufs.push(newObj);
+    sendLog(`  fixMultiTitleNavigation: obj[${numObjs + i}] → PlayPL(${playlistId})`);
+  }
+
+  const totalNewObjBytes = newObjBufs.reduce((s, b) => s + b.length, 0);
+  const newMobjBuf = Buffer.concat([mobjBuf, ...newObjBufs]);
+  newMobjBuf.writeUInt32BE(mobjLength + totalNewObjBytes, MOBJ_STRUCT_OFF);
+  newMobjBuf.writeUInt16BE(numObjs + numAdditionalTitles, NUM_OBJS_OFF);
+
+  fs.writeFileSync(mobjPath, newMobjBuf);
+  sendLog(`  fixMultiTitleNavigation: MovieObject.bdmv ${numObjs}→${numObjs + numAdditionalTitles} objects, ${mobjBuf.length}→${newMobjBuf.length} bytes`);
+
+  // ── 2. index.bdmv: register titles in TitleSearchTable ──────────────────
+  // Indexes struct at IndexesStartAddress:
+  //   +0:  Length (4)
+  //   +4:  FirstPlayback (4)
+  //   +8:  TopMenu (4)
+  //   +12: reserved (?) — empirically: NumberOfTitles starts at DATA_START+8
+  //   The layout verified: FirstPlayback(4)+TopMenu(4)+NumTitles(2)+entries(4 each)
+  //   28 pre-allocated bytes after NumTitles = up to 7 slots before file extension needed
+  const idxBuf       = Buffer.from(fs.readFileSync(indexPath));
+  const idxStart     = idxBuf.readUInt32BE(8);  // IndexesStartAddress
+  const idxLen       = idxBuf.readUInt32BE(idxStart);
+  const idxDataStart = idxStart + 4;
+
+  const NUM_TITLES_OFF = idxDataStart + 8;   // NumberOfTitles field offset
+  const TITLES_OFF     = idxDataStart + 10;  // title entries begin here
+
+  const curNumTitles = idxBuf.readUInt16BE(NUM_TITLES_OFF);
+  const newNumTitles = curNumTitles + numAdditionalTitles;
+
+  // Build new 4-byte title entries: HDMV(0x40) | reserved(0x00) | movieObjRef(2 bytes BE)
+  const newEntries = Buffer.alloc(numAdditionalTitles * 4);
+  for (let i = 0; i < numAdditionalTitles; i++) {
+    const movieObjIdx = numObjs + i;  // new objects are at indices 3, 4, …
+    newEntries[i * 4 + 0] = 0x40;
+    newEntries[i * 4 + 1] = 0x00;
+    newEntries.writeUInt16BE(movieObjIdx, i * 4 + 2);
+    sendLog(`  fixMultiTitleNavigation: Title[${curNumTitles + i}] → MovieObject[${movieObjIdx}]`);
+  }
+
+  const remainingSlots = Math.floor((idxLen - 10 - curNumTitles * 4) / 4);
+  let newIdxBuf;
+  if (numAdditionalTitles <= remainingSlots) {
+    newIdxBuf = Buffer.from(idxBuf);
+    newIdxBuf.writeUInt16BE(newNumTitles, NUM_TITLES_OFF);
+    newEntries.copy(newIdxBuf, TITLES_OFF + curNumTitles * 4);
+  } else {
+    const extraBytes = (numAdditionalTitles - remainingSlots) * 4;
+    newIdxBuf = Buffer.concat([idxBuf, Buffer.alloc(extraBytes)]);
+    newIdxBuf.writeUInt32BE(idxLen + extraBytes, idxStart);
+    newIdxBuf.writeUInt16BE(newNumTitles, NUM_TITLES_OFF);
+    newEntries.copy(newIdxBuf, TITLES_OFF + curNumTitles * 4);
+    sendLog(`  fixMultiTitleNavigation: extended index.bdmv by ${extraBytes} bytes`);
+  }
+
+  fs.writeFileSync(indexPath, newIdxBuf);
+  sendLog(`  fixMultiTitleNavigation: index.bdmv NumberOfTitles ${curNumTitles}→${newNumTitles}, ${idxBuf.length}→${newIdxBuf.length} bytes`);
+
+  // Sync BACKUP copies
+  if (fs.existsSync(backDir)) {
+    fs.copyFileSync(mobjPath,  path.join(backDir, 'MovieObject.bdmv'));
+    fs.copyFileSync(indexPath, path.join(backDir, 'index.bdmv'));
+    sendLog('  fixMultiTitleNavigation: BACKUP copies updated');
+  }
+}
+
 // When tsMuxeR runs with --custom-menu-bg it creates:
 //   STREAM/00000.m2ts — menu stub loop
 //   STREAM/00001.m2ts — main feature
-//   PLAYLIST/00000.mpls — broken (references clip 00000 instead of 00001)
-// Hardware players read 00000.mpls to find the main feature and fail because the
-// clip reference points at the menu stub.  This function patches 00000.mpls with a
-// binary find/replace of the ASCII clip name so it correctly references 00001.m2ts.
-function patchMainTitlePlaylist(bdFolder) {
+//   PLAYLIST/00000.mpls — clip reference points to 00000 instead of 00001
+// Patch the MPLS in place; leave index.bdmv and MovieObject.bdmv untouched.
+function patchMainTitlePlaylist(bdFolder, hardwareMode = false) {
+  if (hardwareMode) {
+    sendLog('patchMainTitlePlaylist: skipped — Blu-ray-safe mode (tsMuxeR BDMV used as-is, no binary patching)');
+    return;
+  }
   const bdmvDir  = path.join(bdFolder, 'BDMV');
   const stream01 = path.join(bdmvDir, 'STREAM', '00001.m2ts');
 
-  // Only needed when tsMuxeR produced 00001.m2ts (menu-enabled disc).
-  // Without a menu the main feature is always 00000.m2ts and 00000.mpls already
-  // references it correctly.
   if (!fs.existsSync(stream01)) {
     sendLog('patchMainTitlePlaylist: no 00001.m2ts — menu not present, skipping');
     return;
   }
 
-  const playDir  = path.join(bdmvDir, 'PLAYLIST');
-  const clipDir  = path.join(bdmvDir, 'CLIPINF');
-  const backDir  = path.join(bdmvDir, 'BACKUP');
+  const playDir = path.join(bdmvDir, 'PLAYLIST');
+  const clipDir = path.join(bdmvDir, 'CLIPINF');
+  const backDir = path.join(bdmvDir, 'BACKUP');
   const mplsPath = path.join(playDir, '00000.mpls');
 
-  // Always overwrite with a freshly constructed MPLS — tsMuxeR may produce a binary
-  // clip reference (no ASCII "00000"), so find/replace is unreliable.
-  // Layout: 58-byte header, PlayList at 58, PlayListMark at 96, total 102 bytes.
-  {
-    // Read the actual presentation_end_time from 00001.clpi so hardware players get
-    // an accurate duration rather than the sentinel 0xFFFFFFFF.
-    const clpi01ForTime = path.join(clipDir, '00001.clpi');
-    const clpiEndTime   = readClpiEndTime(clpi01ForTime);
-    const outTime = (clpiEndTime && clpiEndTime > 0 && clpiEndTime !== 0xFFFFFFFF)
-      ? clpiEndTime : 0xFFFFFFFF;
-    if (clpiEndTime) sendLog(`patchMainTitlePlaylist: OUTtime from CLPI = 0x${outTime.toString(16).toUpperCase()}`);
+  if (!fs.existsSync(mplsPath)) {
+    sendLog('patchMainTitlePlaylist: no 00000.mpls — movie-only mode (no menu stub), skipping patch');
+    return;
+  }
 
-    // PlayItem body = "00001"(5)+"M2TS"(4)+flags(2)+stcId(1)+IN(4)+OUT(4)+UO(2)+rnd(1)+still(1)+stillTime(1)+numSTN(1) = 26
-    const PLAYLIST_OFFSET      = 58;
-    const PLAY_ITEM_BODY       = 26;
-    const PLAYLIST_BODY        = 6 + 2 + PLAY_ITEM_BODY;  // 34: header(6)+item_len_field(2)+body(26)
-    const PLAYLISTMARK_OFFSET  = PLAYLIST_OFFSET + 4 + PLAYLIST_BODY;  // 96
-    const TOTAL                = PLAYLISTMARK_OFFSET + 6;  // 102: 4-byte length + 2-byte count
-
-    const mpls = Buffer.alloc(TOTAL, 0);
-
-    // Header
-    mpls.write('MPLS', 0, 'ascii');
-    mpls.write('0200', 4, 'ascii');
-    mpls.writeUInt32BE(PLAYLIST_OFFSET,     8);   // AppInfoPlayList offset
-    mpls.writeUInt32BE(PLAYLIST_OFFSET,    12);   // PlayList offset
-    mpls.writeUInt32BE(PLAYLISTMARK_OFFSET, 16);  // PlayListMark offset
-    // offset 20: ExtensionData = 0 (no extension)
-
-    // PlayList
-    let off = PLAYLIST_OFFSET;
-    mpls.writeUInt32BE(PLAYLIST_BODY, off); off += 4;  // length (excludes this field)
-    mpls.writeUInt16BE(0,             off); off += 2;  // reserved
-    mpls.writeUInt16BE(1,             off); off += 2;  // num PlayItems
-    mpls.writeUInt16BE(0,             off); off += 2;  // num SubPaths
-
-    // PlayItem
-    mpls.writeUInt16BE(PLAY_ITEM_BODY, off); off += 2;
-    mpls.write('00001', off, 'ascii');       off += 5;
-    mpls.write('M2TS',  off, 'ascii');       off += 4;
-    mpls.writeUInt16BE(0x8001, off);         off += 2;  // flags
-    mpls.writeUInt8(0,         off);         off += 1;  // StcID
-    mpls.writeUInt32BE(0,       off);         off += 4;  // INtime
-    mpls.writeUInt32BE(outTime, off);         off += 4;  // OUTtime
-    mpls.writeUInt16BE(0,      off);         off += 2;  // UO_mask_table
-    mpls.writeUInt8(0x81,      off);         off += 1;  // random_access_flag
-    mpls.writeUInt8(0,         off);         off += 1;  // still_mode
-    mpls.writeUInt8(0,         off);         off += 1;  // still_time
-    mpls.writeUInt8(0,         off);         off += 1;  // num_STN
-
-    // PlayListMark (empty — no chapter marks)
-    off = PLAYLISTMARK_OFFSET;
-    mpls.writeUInt32BE(2, off); off += 4;  // length = 2 (just the count field)
-    mpls.writeUInt16BE(0, off);            // num_PlayListMarks = 0
-
-    fs.mkdirSync(playDir, { recursive: true });
+  // Binary patch: change clip reference from "00000" to "00001" in tsMuxeR's MPLS.
+  const needle      = Buffer.from('00000M2TS', 'ascii');
+  const replacement = Buffer.from('00001M2TS', 'ascii');
+  const mpls = fs.readFileSync(mplsPath);
+  const idx  = mpls.indexOf(needle);
+  if (idx !== -1) {
+    replacement.copy(mpls, idx);
     fs.writeFileSync(mplsPath, mpls);
     if (fs.existsSync(backDir)) {
       fs.mkdirSync(path.join(backDir, 'PLAYLIST'), { recursive: true });
       fs.writeFileSync(path.join(backDir, 'PLAYLIST', '00000.mpls'), mpls);
     }
-    sendLog(`patchMainTitlePlaylist: wrote fresh 00000.mpls (${TOTAL} bytes) referencing clip 00001`);
+    sendLog('patchMainTitlePlaylist: patched 00000.mpls clip ref 00000\u219200001');
+  } else {
+    sendLog('patchMainTitlePlaylist: 00000.mpls already references 00001 — no patch needed');
   }
 
-  // Patch index.bdmv — tsMuxeR may overwrite it with a version that has IndexTable offset = 0.
-  // Re-read the file and fix bytes 12-15 (IndexTable_start_address) if needed.
-  const idxPath = path.join(bdmvDir, 'index.bdmv');
-  if (fs.existsSync(idxPath)) {
-    const idxBuf = fs.readFileSync(idxPath);
-    const currentIdxOff = idxBuf.readUInt32BE(12);
-    if (currentIdxOff === 0 || currentIdxOff === idxBuf.readUInt32BE(8)) {
-      // Find AppInfoBDMV offset and length to calculate correct IndexTable offset
-      const appInfoOff = idxBuf.readUInt32BE(8);
-      if (appInfoOff > 0 && appInfoOff + 4 < idxBuf.length) {
-        const appInfoLen = idxBuf.readUInt32BE(appInfoOff);
-        const idxTableOff = appInfoOff + 4 + appInfoLen;
-        idxBuf.writeUInt32BE(idxTableOff, 12);
-        fs.writeFileSync(idxPath, idxBuf);
-        const backIdxPath = path.join(backDir, 'index.bdmv');
-        if (fs.existsSync(backIdxPath)) fs.writeFileSync(backIdxPath, idxBuf);
-        sendLog(`patchMainTitlePlaylist: fixed index.bdmv IndexTable offset → ${idxTableOff} (0x${idxTableOff.toString(16)})`);
-      }
-    } else {
-      sendLog(`patchMainTitlePlaylist: index.bdmv IndexTable offset already OK: 0x${currentIdxOff.toString(16)}`);
-    }
-  }
-
-  // Ensure CLIPINF/00001.clpi exists — tsMuxeR should create it alongside 00001.m2ts
-  // but create a fallback if it's missing.
+  // 00001.clpi must exist \u2014 written by tsMuxeR's single pass when a menu is present.
   const clpi01 = path.join(clipDir, '00001.clpi');
   if (!fs.existsSync(clpi01)) {
     const clpi00 = path.join(clipDir, '00000.clpi');
     if (fs.existsSync(clpi00)) {
-      fs.copyFileSync(clpi00, clpi01);
-      if (fs.existsSync(backDir)) {
-        fs.mkdirSync(path.join(backDir, 'CLIPINF'), { recursive: true });
-        fs.copyFileSync(clpi00, path.join(backDir, 'CLIPINF', '00001.clpi'));
-      }
-      sendLog('patchMainTitlePlaylist: copied 00000.clpi → 00001.clpi');
-    } else {
-      writeBdClpi(clipDir, fs.existsSync(backDir) ? backDir : null, '00001');
-      sendLog('patchMainTitlePlaylist: wrote minimal 00001.clpi');
+      throw new Error('patchMainTitlePlaylist: CLIPINF/00001.clpi not found but 00000.clpi exists \u2014 tsMuxeR did not produce a separate main-feature clip; check menu configuration');
     }
+    throw new Error('patchMainTitlePlaylist: CLIPINF/00001.clpi not found \u2014 tsMuxeR must have failed');
   }
+  sendLog('patchMainTitlePlaylist: 00001.clpi verified (tsMuxeR-generated)');
 }
 
 function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleIdx) {
+  if (!project._experimentalMultiTitle) {
+    sendLog('Additional title processing skipped (multi-title is experimental)');
+    return Promise.resolve();
+  }
   return new Promise((resolve, reject) => {
     const pad      = n => String(n).padStart(5, '0');
     const filePath = title.file?.path;
@@ -1173,8 +1307,13 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
     const patchClipId = (srcPath, destPath) => {
       let buf = fs.readFileSync(srcPath);
       const magic = buf.slice(0, 4).toString('ascii');
-      if (magic !== 'MPLS' && magic !== 'CLPI') { fs.writeFileSync(destPath, buf); return; }
-      const from = Buffer.from('00001', 'ascii');
+      // CLPI files are identified by filename only — the internal data contains binary codec
+      // parameters, not ASCII clip references. Just copy without patching.
+      if (magic !== 'MPLS') { fs.writeFileSync(destPath, buf); return; }
+      // MPLS contains "00000M2TS" or "00001M2TS" — replace whichever clip ID is present.
+      // tsMuxeR 2.6.16-dev uses 00000.* for all additional-title temp builds (no menu).
+      const srcId = buf.indexOf(Buffer.from('00001', 'ascii')) !== -1 ? '00001' : '00000';
+      const from = Buffer.from(srcId, 'ascii');
       const to   = Buffer.from(pad(titleIdx), 'ascii');
       let i = 0;
       while ((i = buf.indexOf(from, i)) !== -1) { to.copy(buf, i); i += from.length; }
@@ -1222,7 +1361,8 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
         patchClipId(srcClip, path.join(clipDir, `${pad(titleIdx)}.clpi`));
         patchClipId(srcClip, path.join(backDir, `${pad(titleIdx)}.clpi`));
       } else {
-        writeBdClpi(clipDir, backDir, pad(titleIdx));
+        cleanup(tempBdFolder);
+        return reject(new Error(`Title ${titleIdx}: tsMuxeR produced no CLPI file`));
       }
 
       const srcPlay = findFirst('PLAYLIST', 'mpls');
@@ -1230,8 +1370,8 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
         patchClipId(srcPlay, path.join(playDir, `${pad(titleIdx)}.mpls`));
         patchClipId(srcPlay, path.join(backDir, `${pad(titleIdx)}.mpls`));
       } else {
-        sendLog(`Warning: no playlist found in tsMuxeR output for title ${titleIdx} — writing minimal MPLS`);
-        writeBdMpls(playDir, backDir, pad(titleIdx));
+        cleanup(tempBdFolder);
+        return reject(new Error(`Title ${titleIdx}: tsMuxeR produced no MPLS file`));
       }
 
       cleanup(tempBdFolder);
@@ -1256,16 +1396,13 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
       'MPEG-2':     'V_MPEG-2',
     };
     const fps    = getVideoFps(filePath);
-    // CRF and VideoToolbox re-encode always output H.264; override codec string for tsMuxeR meta.
     const titleCrfVal = getCrfValue(title.videoQuality);
-    const titleIsVtb  = title.videoQuality === 'videotoolbox';
-    const vCodec = (titleCrfVal || titleIsVtb) ? 'V_MPEG4/ISO/AVC' : (vCodecMap[project.videoFormat] || 'V_MPEG4/ISO/AVC');
+    const vCodec = 'V_MPEG4/ISO/AVC';
     const resDims = {
       '1080p (1920×1080)':  [1920, 1080],
       '720p (1280×720)':    [1280, 720],
       '480p (720×480)':     [720,  480],
       '480p (720×576) PAL': [720,  576],
-      '4K UHD (3840×2160)': [3840, 2160],
     };
     const srcRes = detectResolution(filePath);
     const resCorrTarget = (srcRes.w && srcRes.h) ? getBdCompliantResolution(srcRes.w, srcRes.h) : null;
@@ -1290,7 +1427,7 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
     // On any failure, falls through to the 3-step FFmpeg pipeline (Attempt 2).
 
     const runTsMuxerDirectMkv = () => {
-      const metaLines = ['MUXOPT --blu-ray --no-pcr-on-video-pid --new-audio-pes'];
+      const metaLines = ['MUXOPT --blu-ray --new-audio-pes'];
 
       metaLines.push(`${vCodec}, "${tsPath(filePath)}", fps=${fps}, insertSEI, contSPS, track=1`);
 
@@ -1307,16 +1444,14 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
       }
 
       subtitleTracks.forEach(sub => {
+        // S_TEXT/UTF8 silently causes tsMuxeR --blu-ray to produce no output; PGS only.
+        if (sub.format !== 'PGS (Blu-ray Native)') return;
         const streamIdx = sub.trackIndex ?? sub.streamIndex;
         const tsmTrack  = streamIdx + 1;
         const lang      = langCode(sub.language);
         const forced    = sub.isForced ? ', forced' : '';
         const name      = trackName(streamIdx);
-        if (sub.format === 'PGS (Blu-ray Native)') {
-          metaLines.push(`S_HDMV/PGS, "${tsPath(filePath)}", lang=${lang}, track=${tsmTrack}${forced}${name}`);
-        } else {
-          metaLines.push(`S_TEXT/UTF8, "${tsPath(filePath)}", lang=${lang}, track=${tsmTrack}, video-width=${vW}, video-height=${vH}, fps=${fps}, font-name=Arial, font-size=48, font-color=0xFFFFFF, bottom-offset=24${forced}${name}`);
-        }
+        metaLines.push(`S_HDMV/PGS, "${tsPath(filePath)}", lang=${lang}, track=${tsmTrack}${forced}${name}`);
       });
 
       const metaFile = path.join(workDir, `tsmuxer_title_${pad(titleIdx)}.meta`);
@@ -1369,21 +1504,26 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
             : `scale=${resCorrTarget.w}:${resCorrTarget.h}`)
         : null;
 
-      // Build video codec args: CRF re-encode, VideoToolbox, or stream-copy
       const addVideoCodecArgs = (args) => {
-        if (titleIsVtb) {
-          const vtbArgs = getVideoToolboxArgs(vH);
-          args.push('-c:v', 'h264_videotoolbox', ...vtbArgs, '-pix_fmt', 'yuv420p');
-          if (resVfStr) args.push('-vf', resVfStr);
-        } else if (titleCrfVal) {
+        if (titleCrfVal) {
           const h264Level = vH <= 480 ? '3.1' : '4.1';
-          args.push('-c:v', 'libx264', '-crf', String(titleCrfVal), '-preset', 'slow',
-                    '-profile:v', 'high', '-level', h264Level, '-pix_fmt', 'yuv420p');
+          const is1080p = vH > 720;
+          const qual = title.videoQuality;
+          const crfVal = qual === 'crf18' ? '18' : qual === 'crf23' ? '23' : '20';
+          const mrK = is1080p ? '25000k' : '15000k';
+          const bsK = is1080p ? '30000k' : '20000k';
+          args.push('-c:v', 'libx264', '-preset', 'slow',
+                    '-profile:v', 'high', '-level', h264Level, '-pix_fmt', 'yuv420p',
+                    '-crf', crfVal, '-maxrate', mrK, '-bufsize', bsK);
           if (resVfStr) args.push('-vf', resVfStr);
         } else if (resVfStr) {
           const level = vH <= 480 ? '3.1' : '4.1';
-          args.push('-c:v', 'libx264', '-crf', '16', '-preset', 'fast',
-                    '-profile:v', 'high', '-level', level, '-pix_fmt', 'yuv420p');
+          const is1080p = vH > 720;
+          const mrK = is1080p ? '25000k' : '15000k';
+          const bsK = is1080p ? '30000k' : '20000k';
+          args.push('-c:v', 'libx264', '-preset', 'slow',
+                    '-profile:v', 'high', '-level', level, '-pix_fmt', 'yuv420p',
+                    '-crf', '20', '-maxrate', mrK, '-bufsize', bsK);
           args.push('-vf', resVfStr);
         } else {
           args.push('-c:v', 'copy');
@@ -1408,18 +1548,16 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
       }
       ffArgs.push('-f', 'mpegts', '-mpegts_flags', 'system_b', titleTs);
 
-      if (titleIsVtb) {
-        const vtbLevel = getVideoToolboxArgs(vH);
-        sendLog(`  Video: VideoToolbox H.264 hardware encode (${vtbLevel[1]}, Level ${vtbLevel[vtbLevel.length - 1]})`);
-        if (resCorrTarget) sendLog(`  Auto-correcting resolution: ${srcRes.w}×${srcRes.h} → ${resCorrTarget.w}×${resCorrTarget.h} (${resCorrTarget.padOnly ? 'padding' : 'scaling'})`);
-      } else if (titleCrfVal) {
+      if (titleCrfVal) {
         const h264Level = vH <= 480 ? '3.1' : '4.1';
-        sendLog(`  Video: CRF ${titleCrfVal} (H.264 High Profile, Level ${h264Level})`);
+        const qual2 = title.videoQuality;
+        const crfLog = qual2 === 'crf18' ? '18' : qual2 === 'crf23' ? '23' : '20';
+        sendLog(`  Video: libx264 Blu-ray-safe CRF${crfLog} L${h264Level}`);
         if (resCorrTarget) sendLog(`  Auto-correcting resolution: ${srcRes.w}×${srcRes.h} → ${resCorrTarget.w}×${resCorrTarget.h} (${resCorrTarget.padOnly ? 'padding' : 'scaling'})`);
         const dur = getVideoDuration(filePath);
         if (dur > 0) sendLog(`__CRF_START:${Math.round(dur)}`);
       } else if (resCorrTarget) {
-        sendLog(`  Auto-correcting resolution: ${srcRes.w}×${srcRes.h} → ${resCorrTarget.w}×${resCorrTarget.h} (${resCorrTarget.padOnly ? 'padding' : 'scaling'}) — near-lossless CRF 16`);
+        sendLog(`  Auto-correcting resolution: ${srcRes.w}×${srcRes.h} → ${resCorrTarget.w}×${resCorrTarget.h} (${resCorrTarget.padOnly ? 'padding' : 'scaling'}) — libx264 Blu-ray-safe`);
       }
 
       sendLog(`  Step 1: FFmpeg → ${path.basename(titleTs)}`);
@@ -1439,8 +1577,7 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
         }
         sendLog(`  ✓ Step 1: ${path.basename(titleTs)} (${tsSizeMB} MB)`);
         if (!TOOLS.tsmuxer) {
-          // tsMuxeR unavailable — no point extracting subs, just copy the .ts
-          return copyTsLastResort();
+          return reject(new Error(`Title ${titleIdx}: tsMuxeR is required for BD-compliant additional titles`));
         }
         runExtractSubs();
       });
@@ -1557,8 +1694,7 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
         return runTsMuxerDirectOnTs(pgsSubs);
       }
       if (!TOOLS.tsmuxer) {
-        sendLog(`  tsMuxeR not found — last resort copy (no subs)`);
-        return copyTsLastResort();
+        return reject(new Error(`Title ${titleIdx}: tsMuxeR is required for BD-compliant additional titles`));
       }
 
       const combinedMkv = path.join(workDir, `combined_title_${pad(titleIdx)}.mkv`);
@@ -1579,14 +1715,12 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
       mkvProc.stdout.on('data', d => { const l = d.toString().trim(); if (l) sendLog(l); });
       mkvProc.stderr.on('data', d => { const l = d.toString().trim(); if (l) sendLog(l); });
       mkvProc.on('error', err => {
-        sendLog(`  Step 5 mkvmerge error: ${err.message} — last resort copy`);
-        copyTsLastResort();
+        reject(new Error(`Title ${titleIdx}: mkvmerge error: ${err.message}`));
       });
       mkvProc.on('close', code => {
         // mkvmerge exits 1 for warnings (output is still valid), 2+ for hard errors
         if (code >= 2 || !fs.existsSync(combinedMkv)) {
-          sendLog(`  Step 5 mkvmerge failed (exit ${code}) — last resort copy`);
-          return copyTsLastResort();
+          return reject(new Error(`Title ${titleIdx}: mkvmerge failed (exit ${code})`));
         }
         const mkvSizeMB = (fs.statSync(combinedMkv).size / 1e6).toFixed(1);
         sendLog(`  ✓ Step 5: ${path.basename(combinedMkv)} (${mkvSizeMB} MB)`);
@@ -1594,7 +1728,7 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
         // ── Step 6: tsMuxeR reads combined.mkv ───────────────────────────────
         // List each stream type in MKV order — no track= needed; tsMuxeR picks
         // streams sequentially (first video, then each audio, then each subtitle).
-        const metaLines = ['MUXOPT --blu-ray --no-pcr-on-video-pid --new-audio-pes'];
+        const metaLines = ['MUXOPT --blu-ray --new-audio-pes'];
         const mkvRef    = tsPath(combinedMkv);
 
         // Track numbers in the combined MKV:
@@ -1632,15 +1766,13 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
         tsProcFinal.stdout.on('data', d => { const l = d.toString().trim(); if (l) sendLog(l); });
         tsProcFinal.stderr.on('data', d => { const l = d.toString().trim(); if (l) sendLog(l); });
         tsProcFinal.on('error', err => {
-          sendLog(`  Step 6 tsMuxeR error: ${err.message} — last resort copy`);
           cleanup(tempBdFolder);
-          copyTsLastResort();
+          reject(new Error(`Title ${titleIdx}: tsMuxeR error: ${err.message}`));
         });
         tsProcFinal.on('close', tsmCode => {
           if (tsmCode !== 0) {
-            sendLog(`  Step 6 tsMuxeR failed (exit ${tsmCode}) — last resort copy`);
             cleanup(tempBdFolder);
-            return copyTsLastResort();
+            return reject(new Error(`Title ${titleIdx}: tsMuxeR failed (exit ${tsmCode})`));
           }
           sendLog(`  Step 6 ok — merging`);
           mergeFromTempBd(tempBdFolder);
@@ -1651,8 +1783,8 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
     // Fallback used when mkvmerge is unavailable: feed .ts + .sup directly to
     // tsMuxeR (video may be dropped — known limitation with FFmpeg-produced .ts).
     const runTsMuxerDirectOnTs = (pgsSubs) => {
-      if (!TOOLS.tsmuxer) return copyTsLastResort();
-      const metaLines = ['MUXOPT --blu-ray --no-pcr-on-video-pid --new-audio-pes'];
+      if (!TOOLS.tsmuxer) return reject(new Error(`Title ${titleIdx}: tsMuxeR is required for BD-compliant additional titles`));
+      const metaLines = ['MUXOPT --blu-ray --new-audio-pes'];
       metaLines.push(`${vCodec}, "${tsPath(titleTs)}", fps=${fps}, insertSEI, contSPS, track=1`);
       if (audioTracks.length > 0) {
         audioTracks.forEach((t, i) => {
@@ -1677,9 +1809,9 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
       const tsFb = spawn(TOOLS.tsmuxer, [metaFile, tempBdFolder]);
       tsFb.stdout.on('data', d => { const l = d.toString().trim(); if (l) sendLog(l); });
       tsFb.stderr.on('data', d => { const l = d.toString().trim(); if (l) sendLog(l); });
-      tsFb.on('error', () => { cleanup(tempBdFolder); copyTsLastResort(); });
+      tsFb.on('error', err => { cleanup(tempBdFolder); reject(new Error(`Title ${titleIdx}: tsMuxeR error: ${err.message}`)); });
       tsFb.on('close', code => {
-        if (code !== 0) { cleanup(tempBdFolder); return copyTsLastResort(); }
+        if (code !== 0) { cleanup(tempBdFolder); return reject(new Error(`Title ${titleIdx}: tsMuxeR failed (exit ${code})`)); }
         mergeFromTempBd(tempBdFolder);
       });
     };
@@ -1696,8 +1828,7 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
       sendLog(`  Step 3: tsMuxeR with .ts + ${extractedSubs.length} subtitle file(s)`);
 
       if (!TOOLS.tsmuxer) {
-        sendLog(`  tsMuxeR not found — last resort copy (no subs)`);
-        return copyTsLastResort();
+        return reject(new Error(`Title ${titleIdx}: tsMuxeR is required for BD-compliant additional titles`));
       }
 
       const textSubs = extractedSubs.filter(s => s.format !== 'PGS (Blu-ray Native)');
@@ -1713,7 +1844,7 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
       cleanup(subTempBd);
       fs.mkdirSync(subTempBd, { recursive: true });
 
-      const subMetaLines = ['MUXOPT --blu-ray --no-pcr-on-video-pid --new-audio-pes'];
+      const subMetaLines = ['MUXOPT --blu-ray --new-audio-pes'];
       subMetaLines.push(`${vCodec}, "${tsPath(titleTs)}", fps=${fps}, track=1`);
       if (audioTracks.length > 0) {
         audioTracks.forEach((t, i) => {
@@ -1724,11 +1855,7 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
       } else {
         subMetaLines.push(`A_AC3, "${tsPath(titleTs)}", lang=und, track=2`);
       }
-      textSubs.forEach(sub => {
-        const lang   = langCode(sub.language);
-        const forced = sub.isForced ? ', forced' : '';
-        subMetaLines.push(`S_TEXT/UTF8, "${tsPath(sub.extractedPath)}", lang=${lang}, video-width=${vW}, video-height=${vH}, fps=${fps}, font-name=Arial, font-size=48, font-color=0xFFFFFF, bottom-offset=24${forced}`);
-      });
+      // S_TEXT/UTF8 silently causes tsMuxeR --blu-ray to produce no output; text subs excluded.
 
       const subMetaFile = path.join(workDir, `tsmuxer_title_${pad(titleIdx)}_subtmp.meta`);
       fs.writeFileSync(subMetaFile, subMetaLines.join('\n') + '\n');
@@ -1775,14 +1902,10 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
           fs.mkdirSync(subTempBd2, { recursive: true });
 
           // Retry meta: video + audio + SRT subs — audio is AC3 in the .mkv, no mismatch
-          const retryMetaLines = ['MUXOPT --blu-ray --no-pcr-on-video-pid --new-audio-pes'];
+          const retryMetaLines = ['MUXOPT --blu-ray --new-audio-pes'];
           retryMetaLines.push(`${vCodec}, "${tsPath(forsubsMkv)}", fps=${fps}, track=1`);
           retryMetaLines.push(`A_AC3, "${tsPath(forsubsMkv)}", track=2`);
-          textSubs.forEach(sub => {
-            const lang   = langCode(sub.language);
-            const forced = sub.isForced ? ', forced' : '';
-            retryMetaLines.push(`S_TEXT/UTF8, "${tsPath(sub.extractedPath)}", lang=${lang}, video-width=${vW}, video-height=${vH}, fps=${fps}, font-name=Arial, font-size=48, font-color=0xFFFFFF, bottom-offset=24${forced}`);
-          });
+          // S_TEXT/UTF8 silently causes tsMuxeR --blu-ray to produce no output; text subs excluded.
 
           const retryMetaFile = path.join(workDir, `tsmuxer_title_${pad(titleIdx)}_subtmp2.meta`);
           fs.writeFileSync(retryMetaFile, retryMetaLines.join('\n') + '\n');
@@ -1952,33 +2075,58 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
       });
     };
 
-    // ── Last resort: copy .ts as .m2ts without subtitles ─────────────────────
-    const copyTsLastResort = () => {
-      const dest = path.join(streamDir, `${pad(titleIdx)}.m2ts`);
-      sendLog(`  Last resort: ${path.basename(titleTs)} → ${path.basename(dest)} (no subtitles)`);
-      try {
-        fs.copyFileSync(titleTs, dest);
-      } catch (err) {
-        return reject(new Error(`Title ${titleIdx}: last resort copy failed: ${err.message}`));
-      }
-      writeBdClpi(clipDir, backDir, pad(titleIdx));
-      writeBdMpls(playDir, backDir, pad(titleIdx));
-      validateM2ts(dest);
-    };
-
     // ── Orchestration ─────────────────────────────────────────────────────────
     if (!TOOLS.tsmuxer) {
       // No tsMuxeR at all: FFmpeg only (no subtitles possible)
       sendLog(`  tsMuxeR not found — FFmpeg-only path`);
       return runFfmpegPipeline();
     }
-    if (needsFfmpegPipeline(title.videoQuality)) {
-      // CRF and VideoToolbox re-encode: must go through FFmpeg — tsMuxeR direct cannot re-encode
-      sendLog(`  ${title.videoQuality}: skipping tsMuxeR direct → FFmpeg pipeline`);
+    if (titleCrfVal) {
+      sendLog(`  CRF ${titleCrfVal}: using FFmpeg pipeline`);
       return runFfmpegPipeline();
     }
     runTsMuxerDirectMkv();
   });
+}
+
+// ── BD-safe frame-rate validation ─────────────────────────────────────────────
+const BD_SAFE_FPS = [23.976, 24.000, 25.000, 29.970, 50.000, 59.940];
+const BD_FPS_TOL  = 0.05;
+function isBdSafeFps(fps) {
+  return BD_SAFE_FPS.some(safe => Math.abs(fps - safe) < BD_FPS_TOL);
+}
+
+function getNearestBdSafeFps(fps) {
+  return BD_SAFE_FPS.reduce((best, s) => Math.abs(fps - s) < Math.abs(fps - best) ? s : best);
+}
+
+// BD-valid Blu-ray resolution+FPS combinations (progressive only, no interlace):
+//   1920×1080: 23.976p, 24p  (BD-ROM spec table)
+//   1280×720:  50p (PAL), 59.94p (NTSC)  (BD-ROM spec table)
+// 1080p25 and 1080p29.97 are technically 1080i fields, not guaranteed progressive on hardware.
+// 59.94 at 1080p is not a standard BD-Video format.
+function selectHwResAndFps(srcFps, srcHeight) {
+  const bdH = (srcHeight || 1080) <= 576 ? 480 : (srcHeight || 1080) <= 720 ? 720 : 1080;
+  const bdW = bdH === 480 ? 720 : bdH === 720 ? 1280 : 1920;
+  const fps = (() => {
+    if (Math.abs(srcFps - 23.976) < 0.05) return 23.976;
+    if (Math.abs(srcFps - 24.000) < 0.05) return 24.000;
+    if (Math.abs(srcFps - 25.000) < 0.05 || Math.abs(srcFps - 50.000) < 0.05) return 50.000;
+    if (Math.abs(srcFps - 29.970) < 0.05 || Math.abs(srcFps - 59.940) < 0.05) return 59.940;
+    return 23.976;
+  })();
+  const resolution = bdH === 1080 ? '1080p (1920×1080)' : bdH === 720 ? '720p (1280×720)' : '480p (720×480)';
+  return { w: bdW, h: bdH, fps, resolution };
+}
+
+function getBdFpsFraction(fps) {
+  if (Math.abs(fps - 23.976) < 0.02) return '24000/1001';
+  if (Math.abs(fps - 24.000) < 0.02) return '24';
+  if (Math.abs(fps - 25.000) < 0.02) return '25';
+  if (Math.abs(fps - 29.970) < 0.02) return '30000/1001';
+  if (Math.abs(fps - 50.000) < 0.02) return '50';
+  if (Math.abs(fps - 59.940) < 0.02) return '60000/1001';
+  return fps.toFixed(3);
 }
 
 // ── Helper: read actual video fps via ffprobe ─────────────────────────────────
@@ -2019,20 +2167,6 @@ function getCrfValue(videoQuality) {
   return CRF_VALUES[videoQuality] || null;
 }
 
-// ── Helper: does this quality mode require the FFmpeg pipeline? ───────────────
-// Passthrough is the only mode that bypasses FFmpeg — all re-encode modes
-// (CRF and VideoToolbox) must go through the FFmpeg pipeline.
-function needsFfmpegPipeline(videoQuality) {
-  return videoQuality && videoQuality !== 'passthrough';
-}
-
-// ── Helper: VideoToolbox bitrate args for a given resolution ─────────────────
-function getVideoToolboxArgs(vH) {
-  if (vH <= 480) return ['-b:v', '8000k',  '-profile:v', 'high', '-level', '3.1'];
-  if (vH <= 720) return ['-b:v', '15000k', '-profile:v', 'high', '-level', '4.0'];
-  return               ['-b:v', '20000k', '-profile:v', 'high', '-level', '4.1'];
-}
-
 // ── Helper: get actual video dimensions via ffprobe ───────────────────────────
 function detectResolution(filePath) {
   if (!TOOLS.ffprobe || !filePath) return { w: 0, h: 0 };
@@ -2053,7 +2187,7 @@ function detectResolution(filePath) {
 // Returns null if already compliant, or { w, h, padOnly } for the target.
 // padOnly=true  → pad with black bars (SD, aspect preserved)
 // padOnly=false → scale to target (aspect already matches)
-const _BD_RES = [[1920,1080],[1280,720],[720,480],[720,576],[3840,2160]];
+const _BD_RES = [[1920,1080],[1280,720],[720,480],[720,576]];
 function getBdCompliantResolution(width, height) {
   if (_BD_RES.some(([w,h]) => w===width && h===height)) return null;
   if (height >= 464 && height <= 496 && width <= 720) return { w:720, h:480, padOnly:true };
@@ -2086,6 +2220,83 @@ function getStreamTitles(filePath) {
   return {};
 }
 
+// ── Helper: detect variable frame rate via ffprobe ────────────────────────────
+// Compares r_frame_rate (declared container rate) with avg_frame_rate (computed).
+// A ratio >1.10 indicates the stream is VFR (e.g. phone video, screen recordings).
+function detectVfr(filePath) {
+  if (!TOOLS.ffprobe || !filePath) return { isVfr: false };
+  try {
+    const { execFileSync } = require('child_process');
+    const out = execFileSync(
+      TOOLS.ffprobe,
+      ['-v','quiet','-select_streams','v:0',
+       '-show_entries','stream=r_frame_rate,avg_frame_rate',
+       '-of','csv=p=0', filePath],
+      { encoding:'utf8', timeout:10000 }
+    ).trim().split('\n')[0].trim();
+    const parts = out.split(',');
+    if (parts.length < 2) return { isVfr: false };
+    const parseRate = s => { const [n, d] = s.split('/').map(Number); return (n && d && d > 0) ? n / d : 0; };
+    const rFps   = parseRate(parts[0]);
+    const avgFps = parseRate(parts[1]);
+    if (!rFps || !avgFps) return { isVfr: false };
+    const ratio = Math.max(rFps, avgFps) / Math.min(rFps, avgFps);
+    return { isVfr: ratio > 1.10, rFps, avgFps };
+  } catch (_) {}
+  return { isVfr: false };
+}
+
+// ── Helper: get video codec name via ffprobe ──────────────────────────────────
+function getVideoCodec(filePath) {
+  if (!TOOLS.ffprobe || !filePath) return 'unknown';
+  try {
+    const { execFileSync } = require('child_process');
+    const out = execFileSync(
+      TOOLS.ffprobe,
+      ['-v','quiet','-select_streams','v:0','-show_entries','stream=codec_name','-of','csv=p=0', filePath],
+      { encoding:'utf8', timeout:10000 }
+    ).trim().split('\n')[0].trim();
+    return out || 'unknown';
+  } catch (_) {}
+  return 'unknown';
+}
+
+// ── Step 4b: Prepare main feature (mkvmerge container swap) ──────────────────
+// Convert main.ts → main_bd.mkv so tsMuxeR can produce a proper 192-byte BD
+// stream in its single pass.  Navigation timestamps will then match the stream.
+
+function prepareMainFeature(workDir, tsDir) {
+  return new Promise((resolve, reject) => {
+    const mainTs    = path.join(tsDir, 'main.ts');
+    const mainBdMkv = path.join(workDir, 'main_bd.mkv');
+
+    if (!fs.existsSync(mainTs)) {
+      return reject(new Error('prepareMainFeature: main.ts not found'));
+    }
+    if (!TOOLS.mkvmerge) {
+      sendLog('prepareMainFeature: mkvmerge not found — tsMuxeR will use main.ts directly (192-byte output may vary)');
+      return resolve();
+    }
+
+    sendLog(`Preparing main feature: mkvmerge → main_bd.mkv`);
+    const mkv = spawn(TOOLS.mkvmerge, ['-o', mainBdMkv, mainTs]);
+    mkv.stdout.on('data', d => { const l = d.toString().trim(); if (l) sendLog(l); });
+    mkv.stderr.on('data', d => { const l = d.toString().trim(); if (l) sendLog(l); });
+    mkv.on('error', err => reject(new Error(`mkvmerge error preparing main feature: ${err.message}`)));
+    mkv.on('close', code => {
+      // mkvmerge exits 1 for warnings — output is still valid
+      if (code !== 0 && code !== 1) {
+        return reject(new Error(`mkvmerge exited ${code} while preparing main feature`));
+      }
+      if (!fs.existsSync(mainBdMkv)) {
+        return reject(new Error('mkvmerge did not produce main_bd.mkv'));
+      }
+      sendLog(`  main_bd.mkv: ${(fs.statSync(mainBdMkv).size / 1e6).toFixed(1)} MB`);
+      resolve();
+    });
+  });
+}
+
 // ── Step 5: Write tsMuxeR .meta project file ──────────────────────────────────
 //
 // tsMuxeR meta format:
@@ -2094,17 +2305,22 @@ function getStreamTitles(filePath) {
 //   A_DTS, "file.ts", ...
 //   S_HDMV/PGS, "subtitle.sup", ...
 //
-// tsMuxeR reads the .ts produced by FFmpeg and splits out the individual tracks.
+// tsMuxeR reads main_bd.mkv (container-swapped by mkvmerge) and produces a
+// 192-byte BD stream whose timestamps exactly match the navigation files.
 
 // Escape characters that would break tsMuxeR's double-quoted path parser.
 // Backslashes must be doubled; double-quotes must be escaped. Apostrophes are
 // safe inside double-quoted strings and do NOT need escaping.
 const tsPath = p => p.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 
-function writeTsMuxerMeta(project, workDir, tsDir, bdFolder, isPassthrough) {
+function writeTsMuxerMeta(project, workDir, tsDir, bdFolder) {
   const mainPath  = project.mainVideo?.path || '';
-  // Passthrough: reference original MKV directly; otherwise use the muxed .ts
-  const mainTs   = isPassthrough ? mainPath : path.join(tsDir, 'main.ts');
+  // Use main_bd.mkv (mkvmerge container-swapped) when it exists.
+  // tsMuxeR 2.6.16-dev cannot mux from MPEG-TS input — it processes 0 video frames
+  // silently and produces a 0-byte output. MKV container input works correctly.
+  // Fall back to main.ts only if mkvmerge was unavailable in prepareMainFeature.
+  const mainBdMkv = path.join(workDir, 'main_bd.mkv');
+  const mainTs    = fs.existsSync(mainBdMkv) ? mainBdMkv : path.join(tsDir, 'main.ts');
   const outPath  = path.join(bdFolder, 'BDMV'); // tsMuxeR writes the BDMV tree here
   const metaFile = path.join(workDir, 'tsmuxer.meta');
 
@@ -2116,7 +2332,6 @@ function writeTsMuxerMeta(project, workDir, tsDir, bdFolder, isPassthrough) {
   const muxopts = [
     '--blu-ray',
     `--label="${sanitize(project.title || 'DISC').toUpperCase()}"`,
-    '--no-pcr-on-video-pid',
     '--new-audio-pes',
   ];
   if (hasMenu) muxopts.push(`--custom-menu-bg="${tsPath(menuPng)}"`);
@@ -2124,23 +2339,13 @@ function writeTsMuxerMeta(project, workDir, tsDir, bdFolder, isPassthrough) {
   const lines = [`MUXOPT ${muxopts.join(' ')}`];
 
   // ── Video track ──
-  // Determine codec string for tsMuxeR.
-  // When the main feature was CRF-encoded, the .ts always contains H.264.
-  const vCodecMap = {
-    'H.264 AVC':  'V_MPEG4/ISO/AVC',
-    'H.265 HEVC': 'V_MPEGH/ISO/HEVC',
-    'VC-1':       'V_MS/VFW/WVC1',
-    'MPEG-2':     'V_MPEG-2',
-  };
-  const mainCrfForMeta = getCrfValue(project.mainVideo?.videoQuality);
-  const mainVtbForMeta = project.mainVideo?.videoQuality === 'videotoolbox';
-  const vCodec = (mainCrfForMeta || mainVtbForMeta) ? 'V_MPEG4/ISO/AVC' : (vCodecMap[project.videoFormat] || 'V_MPEG4/ISO/AVC');
+  // Output is always libx264 H.264 — declare V_MPEG4/ISO/AVC unconditionally.
+  const vCodec = 'V_MPEG4/ISO/AVC';
   const resDims = {
     '1080p (1920×1080)':  [1920, 1080],
     '720p (1280×720)':    [1280, 720],
     '480p (720×480)':     [720,  480],
     '480p (720×576) PAL': [720,  576],
-    '4K UHD (3840×2160)': [3840, 2160],
   };
   const mainSrcResForMeta = detectResolution(project.mainVideo?.path || '');
   const mainResCorrForMeta = (mainSrcResForMeta.w && mainSrcResForMeta.h)
@@ -2149,10 +2354,9 @@ function writeTsMuxerMeta(project, workDir, tsDir, bdFolder, isPassthrough) {
   const [subVW, subVH] = mainResCorrForMeta
     ? [mainResCorrForMeta.w, mainResCorrForMeta.h]
     : (resDims[project.resolution] || [1920, 1080]);
-  const fps = getVideoFps(project.mainVideo?.path);
+  const fps = project._safeOutputFps || getVideoFps(project.mainVideo?.path);
   lines.push(`${vCodec}, "${tsPath(mainTs)}", fps=${fps}, insertSEI, contSPS, track=1`);
 
-  // mainPath is used for audio/subtitle sections (defined above for passthrough)
   const streamTitles = getStreamTitles(mainPath);
   // Returns the tsMuxeR track-name fragment for a given 0-based stream index.
   const trackName    = idx => {
@@ -2162,47 +2366,34 @@ function writeTsMuxerMeta(project, workDir, tsDir, bdFolder, isPassthrough) {
   };
 
   // ── Audio tracks ──
-  // The tsMuxeR codec string MUST match what is actually in the .ts file.
-  // muxMainFeature only stream-copies DTS-HD (as DTS core); everything else —
-  // including LPCM and TrueHD — was transcoded to AC3.
-  const aCodecMap = {
-    'DTS-HD Master Audio': 'A_DTS',  // stream-copied as DTS core
-    'Dolby TrueHD':        'A_AC3',  // transcoded to AC3
-    'PCM 5.1':             'A_AC3',  // transcoded to AC3
-    'PCM 7.1':             'A_AC3',  // transcoded to AC3
-    'LPCM Stereo':         'A_AC3',  // transcoded to AC3
-    'Dolby Digital 5.1':   'A_AC3',
-    'DTS 5.1':             'A_DTS',
-  };
+  // The tsMuxeR codec string MUST exactly match what is in the .ts file.
+  // All audio is transcoded to AC3 640k — declare A_AC3 for every track.
   // Build ordered audio list that exactly matches muxMainFeature's FFmpeg mapping order:
-  //   1. Tracks embedded in the main video file (audioFromMkv)
+  //   1. Tracks embedded in the main video file (have stream index, not from additional title)
   //   2. Standalone external audio files (trackIndex == null)
-  // Tracks embedded in OTHER title files (trackIndex != null, file.path !== mainPath)
-  // are excluded — they live in their own title MPEG-TS, not in main.ts.
+  // Use denylist (exclude known additional-title paths) rather than allowlist (require exact
+  // path match to mainPath) — the allowlist silently drops audio when paths differ due to
+  // macOS symlink or normalization differences.
+  const metaAdditionalPaths = new Set((project.titles || []).map(t => t.file?.path).filter(Boolean));
+  sendLog(`  writeTsMuxerMeta: project.audioTracks.length=${project.audioTracks.length}, mainPath="${mainPath}"`);
+  sendLog(`  writeTsMuxerMeta: metaAdditionalPaths=[${[...metaAdditionalPaths].join('|')}]`);
+  project.audioTracks.forEach((t, i) => {
+    sendLog(`    audioTrack[${i}]: file.path="${t.file?.path}", trackIndex=${t.trackIndex ?? t.streamIndex}, format="${t.format}"`);
+  });
   const mainFeatureAudio = [
-    ...project.audioTracks.filter(t => t.file?.path === mainPath && (t.trackIndex ?? t.streamIndex) != null),
+    ...project.audioTracks.filter(t =>
+      (t.trackIndex ?? t.streamIndex) != null &&
+      !(t.file?.path && metaAdditionalPaths.has(t.file.path))
+    ),
     ...project.audioTracks.filter(t => (t.trackIndex ?? t.streamIndex) == null),
   ];
-  // In passthrough mode, audio track codec in tsMuxeR meta should match the
-  // native codec in the MKV — use a broader codec map that preserves all BD codecs.
-  const passthroughACodecMap = {
-    'DTS-HD Master Audio': 'A_DTS',
-    'Dolby TrueHD':        'A_TRUEHD',
-    'PCM 5.1':             'A_LPCM',
-    'PCM 7.1':             'A_LPCM',
-    'LPCM Stereo':         'A_LPCM',
-    'Dolby Digital 5.1':   'A_AC3',
-    'DTS 5.1':             'A_DTS',
-  };
+  sendLog(`  writeTsMuxerMeta: ${mainFeatureAudio.length} audio tracks for main feature (${project.audioTracks.length} total)`);
+  sendLog('tsMuxeR meta: all audio declared A_AC3 (Blu-ray safe)');
   mainFeatureAudio.forEach((track, i) => {
-    const codec      = isPassthrough
-      ? (passthroughACodecMap[track.format] || 'A_AC3')
-      : (aCodecMap[track.format] || 'A_AC3');
-    const lang       = langCode(track.language);
-    const isDefault  = track.isDefault ? ', default' : '';
-    const name       = trackName(track.trackIndex ?? track.streamIndex);
-    // In passthrough mode mainTs is the original MKV; audio track= is still needed
-    lines.push(`${codec}, "${tsPath(mainTs)}", lang=${lang}, track=${i + 2}${isDefault}${name}`);
+    const lang      = langCode(track.language);
+    const isDefault = track.isDefault ? ', default' : '';
+    const name      = trackName(track.trackIndex ?? track.streamIndex);
+    lines.push(`A_AC3, "${tsPath(mainTs)}", lang=${lang}, track=${i + 2}${isDefault}${name}`);
   });
 
   // ── Subtitle tracks ──
@@ -2236,45 +2427,30 @@ function writeTsMuxerMeta(project, workDir, tsDir, bdFolder, isPassthrough) {
 
     if (mainPath && sub.file.path === mainPath && trackIdx != null) {
       // Embedded in the source MKV — tsMuxeR reads directly from the MKV file.
-      // tsMuxeR uses 1-based track numbering; ffprobe index is 0-based.
-      const tsmTrack = trackIdx + 1;
-      const name     = trackName(trackIdx);
+      // Only PGS tracks are included; S_TEXT/UTF8 silently breaks tsMuxeR --blu-ray.
       if (sub.format === 'PGS (Blu-ray Native)') {
+        const tsmTrack = trackIdx + 1;
+        const name     = trackName(trackIdx);
         lines.push(`S_HDMV/PGS, "${tsPath(sub.file.path)}", lang=${lang}, track=${tsmTrack}${forced}${name}`);
-      } else {
-        lines.push(`S_TEXT/UTF8, "${tsPath(sub.file.path)}", lang=${lang}, track=${tsmTrack}, video-width=${subVW}, video-height=${subVH}, fps=${fps}, font-name=Arial, font-size=48, font-color=0xFFFFFF, bottom-offset=24${forced}${name}`);
       }
     } else if (ext === '.sup') {
       // Standalone .sup file — reference directly (no source stream index to look up)
       lines.push(`S_HDMV/PGS, "${tsPath(sub.file.path)}", lang=${lang}${forced}`);
-    } else {
-      // Standalone text sub file — tsMuxeR converts SRT/ASS→PGS on the fly
-      lines.push(`S_TEXT/UTF8, "${tsPath(sub.file.path)}", lang=${lang}, video-width=${subVW}, video-height=${subVH}, fps=${fps}, font-name=Arial, font-size=48, font-color=0xFFFFFF, bottom-offset=24${forced}`);
     }
+    // Standalone text subs (.srt/.ass/etc.) are skipped — tsMuxeR cannot convert
+    // SRT to BD PGS in --blu-ray mode and silently produces no output.
   });
 
-  // ── Chapter markers ──
-  if (project.chapters.length > 0) {
-    const chapFile = path.join(workDir, 'chapters_tsmuxer.txt');
-    // tsMuxeR chapter format: CHAPTER01=HH:MM:SS.mmm
-    const chapLines = project.chapters.flatMap((c, i) => {
-      const n = String(i + 1).padStart(2, '0');
-      return [
-        `CHAPTER${n}=${c.time}.000`,
-        `CHAPTER${n}NAME=${c.name}`,
-      ];
+  // ── Extras (experimental — not proper BD special-feature authoring) ──
+  if (project.extras.length > 0) {
+    sendLog('WARNING: Extras are experimental. They are appended as extra video tracks in the tsMuxeR meta, not as proper BD title entries. Results on hardware players will vary.');
+    project.extras.forEach((extra, i) => {
+      const extraTs = path.join(tsDir, `extra_${String(i+1).padStart(2,'0')}.ts`);
+      if (fs.existsSync(extraTs)) {
+        lines.push(`V_MPEG4/ISO/AVC, "${tsPath(extraTs)}", track=1`);
+      }
     });
-    fs.writeFileSync(chapFile, chapLines.join('\n'));
-    lines.push(`CHAPTERS, "${tsPath(chapFile)}"`);
   }
-
-  // ── Extras ──
-  project.extras.forEach((extra, i) => {
-    const extraTs = path.join(tsDir, `extra_${String(i+1).padStart(2,'0')}.ts`);
-    if (fs.existsSync(extraTs)) {
-      lines.push(`V_MPEG4/ISO/AVC, "${tsPath(extraTs)}", track=1`);
-    }
-  });
 
   fs.writeFileSync(metaFile, lines.join('\n') + '\n');
   const debugCopy = require('os').homedir() + '/Desktop/last_tsmuxer.meta';
@@ -2291,24 +2467,10 @@ function runTsMuxer(workDir, bdFolder) {
     const metaFile = path.join(workDir, 'tsmuxer.meta');
 
     if (!TOOLS.tsmuxer) {
-      sendLog('tsMuxeR not found — using fallback BDMV writer');
-      sendLog(`workDir=${workDir} bdFolder=${bdFolder}`);
-      writeFallbackBDMV(workDir, bdFolder)
-        .then(() => {
-          // Verify BDMV was actually created
-          const bdmvCheck = path.join(bdFolder, 'BDMV');
-          sendLog(`After fallback, BDMV exists: ${require('fs').existsSync(bdmvCheck)}`);
-          if (!require('fs').existsSync(bdmvCheck)) {
-            reject(new Error(`writeFallbackBDMV completed but BDMV dir not found at ${bdmvCheck}`));
-          } else {
-            resolve();
-          }
-        })
-        .catch(err => {
-          sendLog('writeFallbackBDMV ERROR: ' + err.message);
-          reject(err);
-        });
-      return;
+      return reject(new Error(
+        'tsMuxeR is required to build BD-compliant discs.\n\n' +
+        'Install it via:\n  brew install --cask tsmuxer\nor download from https://github.com/justdan96/tsMuxeR/releases'
+      ));
     }
 
     sendLog(`Running: ${TOOLS.tsmuxer} "${metaFile}" "${bdFolder}"`);
@@ -2328,332 +2490,42 @@ function runTsMuxer(workDir, bdFolder) {
     });
 
     proc.on('close', code => {
-      if (code === 0) resolve();
-      else reject(new Error(`tsMuxeR exited with code ${code}:\n${stderr.slice(-500)}`));
+      if (code === 0) {
+        const streamDir  = path.join(bdFolder, 'BDMV', 'STREAM');
+        const m2tsFiles  = fs.existsSync(streamDir)
+          ? fs.readdirSync(streamDir).filter(f => f.toLowerCase().endsWith('.m2ts'))
+          : [];
+        if (!m2tsFiles.length) {
+          return reject(new Error('tsMuxeR produced no output — check the meta file'));
+        }
+        // Log STREAM directory contents and sizes so we can verify output
+        let mainM2tsSize = 0;
+        try {
+          const allFiles = fs.readdirSync(streamDir);
+          const listing = allFiles.map(f => {
+            const fpath = path.join(streamDir, f);
+            const sz = fs.existsSync(fpath) ? fs.statSync(fpath).size : 0;
+            if (f.endsWith('.m2ts') && sz > mainM2tsSize) mainM2tsSize = sz;
+            return `${f} (${(sz / 1e6).toFixed(1)} MB)`;
+          });
+          sendLog('STREAM/ contents: ' + listing.join(', '));
+        } catch(_) {}
+        // tsMuxeR exits 0 but writes 0-byte output when it can't mux the source
+        // (e.g. MPEG-TS input which this version cannot handle — use MKV instead).
+        if (mainM2tsSize < 100 * 1024) {
+          return reject(new Error(
+            `tsMuxeR produced an empty output (largest .m2ts is ${mainM2tsSize} bytes).\n\n` +
+            'This usually means the input file format is incompatible.\n' +
+            'Check that mkvmerge is installed (brew install mkvtoolnix) so Disc Forge can convert main.ts → MKV before passing it to tsMuxeR.'
+          ));
+        }
+        resolve();
+      } else {
+        reject(new Error(`tsMuxeR exited with code ${code}:\n${stderr.slice(-500)}`));
+      }
     });
     proc.on('error', err => reject(new Error(`tsMuxeR error: ${err.message}\n\nMake sure tsMuxeR is installed:\n  brew install --cask tsmuxer\nor download from https://github.com/justdan96/tsMuxeR/releases`)));
   });
-}
-
-// ── Second tsMuxeR pass: convert main.ts → 192-byte BD m2ts ──────────────────
-// FFmpeg outputs 188-byte MPEG-TS.  Running tsMuxeR on a container-swapped MKV
-// produces a proper 192-byte BD stream that hardware players require.
-
-function convertMainFeatureToBd(project, workDir, tsDir, bdFolder) {
-  return new Promise((resolve, reject) => {
-    const mainTs     = path.join(tsDir, 'main.ts');
-    const mainBdMkv  = path.join(workDir, 'main_bd.mkv');
-    const tempBdMain = path.join(workDir, 'bdmv_main_bd');
-    const streamDir  = path.join(bdFolder, 'BDMV', 'STREAM');
-    const clipDir    = path.join(bdFolder, 'BDMV', 'CLIPINF');
-
-    if (!fs.existsSync(mainTs)) {
-      sendLog('convertMainFeatureToBd: main.ts not found — skipping');
-      return resolve();
-    }
-    if (!TOOLS.mkvmerge) {
-      sendLog('convertMainFeatureToBd: mkvmerge not found — skipping (00001.m2ts may be 188-byte)');
-      return resolve();
-    }
-    if (!TOOLS.tsmuxer) {
-      sendLog('convertMainFeatureToBd: tsMuxeR not found — skipping');
-      return resolve();
-    }
-
-    // Step 1: mkvmerge container-swap main.ts → main_bd.mkv
-    sendLog(`Converting main feature to BD format: mkvmerge → main_bd.mkv`);
-    const mkv = spawn(TOOLS.mkvmerge, ['-o', mainBdMkv, mainTs]);
-    mkv.stdout.on('data', d => { const l = d.toString().trim(); if (l) sendLog(l); });
-    mkv.stderr.on('data', d => { const l = d.toString().trim(); if (l) sendLog(l); });
-    mkv.on('error', err => reject(new Error(`mkvmerge error in main BD conversion: ${err.message}`)));
-    mkv.on('close', code => {
-      // mkvmerge exits 1 for warnings (still produces output)
-      if (code !== 0 && code !== 1) {
-        return reject(new Error(`mkvmerge exited ${code} during main feature BD conversion`));
-      }
-      if (!fs.existsSync(mainBdMkv)) {
-        return reject(new Error(`mkvmerge did not produce main_bd.mkv`));
-      }
-      sendLog(`  main_bd.mkv: ${(fs.statSync(mainBdMkv).size / 1e6).toFixed(1)} MB`);
-      runTsMuxerPass();
-    });
-
-    // Step 2: write tsMuxeR meta and produce 192-byte BD stream
-    const runTsMuxerPass = () => {
-      const vCodecMap = {
-        'H.264 AVC':  'V_MPEG4/ISO/AVC',
-        'H.265 HEVC': 'V_MPEGH/ISO/HEVC',
-        'VC-1':       'V_MS/VFW/WVC1',
-        'MPEG-2':     'V_MPEG-2',
-      };
-      const mainCrf = getCrfValue(project.mainVideo?.videoQuality);
-      const mainVtb = project.mainVideo?.videoQuality === 'videotoolbox';
-      const vCodec  = (mainCrf || mainVtb)
-        ? 'V_MPEG4/ISO/AVC'
-        : (vCodecMap[project.videoFormat] || 'V_MPEG4/ISO/AVC');
-      const fps = getVideoFps(project.mainVideo?.path);
-
-      const aCodecMap = {
-        'DTS-HD Master Audio': 'A_DTS',
-        'Dolby TrueHD':        'A_AC3',
-        'PCM 5.1':             'A_AC3',
-        'PCM 7.1':             'A_AC3',
-        'LPCM Stereo':         'A_AC3',
-        'Dolby Digital 5.1':   'A_AC3',
-        'DTS 5.1':             'A_DTS',
-      };
-
-      const mainPath = project.mainVideo?.path || '';
-      const mainFeatureAudio = [
-        ...project.audioTracks.filter(t => t.file?.path === mainPath && (t.trackIndex ?? t.streamIndex) != null),
-        ...project.audioTracks.filter(t => (t.trackIndex ?? t.streamIndex) == null),
-      ];
-
-      const metaLines = ['MUXOPT --blu-ray --no-pcr-on-video-pid --new-audio-pes'];
-      metaLines.push(`${vCodec}, "${tsPath(mainBdMkv)}", fps=${fps}, insertSEI, contSPS, track=1`);
-      mainFeatureAudio.forEach((track, i) => {
-        const codec = aCodecMap[track.format] || 'A_AC3';
-        const lang  = langCode(track.language);
-        metaLines.push(`${codec}, "${tsPath(mainBdMkv)}", lang=${lang}, track=${i + 2}`);
-      });
-
-      const metaFile = path.join(workDir, 'tsmuxer_main_bd.meta');
-      fs.writeFileSync(metaFile, metaLines.join('\n') + '\n');
-      sendLog(`  meta:\n${metaLines.map(l => '    ' + l).join('\n')}`);
-
-      cleanup(tempBdMain);
-      fs.mkdirSync(tempBdMain, { recursive: true });
-      sendLog(`  Running: tsMuxeR "${metaFile}" "${tempBdMain}"`);
-
-      const proc = spawn(TOOLS.tsmuxer, [metaFile, tempBdMain]);
-      proc.stdout.on('data', d => { const l = d.toString().trim(); if (l) sendLog(l); });
-      proc.stderr.on('data', d => { const l = d.toString().trim(); if (l) sendLog(l); });
-      proc.on('error', err => {
-        cleanup(tempBdMain);
-        reject(new Error(`tsMuxeR error in main BD conversion: ${err.message}`));
-      });
-      proc.on('close', code => {
-        if (code !== 0) {
-          cleanup(tempBdMain);
-          return reject(new Error(`tsMuxeR exited ${code} during main feature BD conversion`));
-        }
-        mergeMainBd();
-      });
-    };
-
-    // Step 3: copy resulting stream and clip info into the final BD folder
-    const mergeMainBd = () => {
-      const tempBdmv  = path.join(tempBdMain, 'BDMV');
-      const srcStream = path.join(tempBdmv, 'STREAM',  '00000.m2ts');
-      const srcClip   = path.join(tempBdmv, 'CLIPINF', '00000.clpi');
-      const destStream = path.join(streamDir, '00001.m2ts');
-      const destClip   = path.join(clipDir,   '00001.clpi');
-      const backDir    = path.join(bdFolder, 'BDMV', 'BACKUP');
-
-      if (!fs.existsSync(srcStream)) {
-        cleanup(tempBdMain);
-        return reject(new Error('tsMuxeR produced no stream during main feature BD conversion'));
-      }
-
-      fs.mkdirSync(streamDir, { recursive: true });
-      fs.mkdirSync(clipDir,   { recursive: true });
-
-      fs.copyFileSync(srcStream, destStream);
-      sendLog(`  STREAM/00001.m2ts: ${(fs.statSync(destStream).size / 1e6).toFixed(1)} MB [192-byte BD format]`);
-
-      fs.copyFileSync(srcClip, destClip);
-      if (fs.existsSync(backDir)) {
-        fs.mkdirSync(path.join(backDir, 'CLIPINF'), { recursive: true });
-        fs.copyFileSync(srcClip, path.join(backDir, 'CLIPINF', '00001.clpi'));
-      }
-      sendLog(`  CLIPINF/00001.clpi copied`);
-
-      cleanup(tempBdMain);
-      resolve();
-    };
-  });
-}
-
-// ── Fallback BDMV (when tsMuxeR is absent) ───────────────────────────────────
-// Writes valid-enough binary navigation files for software player compatibility.
-
-function writeFallbackBDMV(workDir, bdFolder) {
-  sendLog(`writeFallbackBDMV: workDir=${workDir} bdFolder=${bdFolder}`);
-
-  const tsDir     = path.join(workDir, 'ts');
-  const mainTs    = path.join(tsDir, 'main.ts');
-  const bdmvDir   = path.join(bdFolder, 'BDMV');
-  const streamDir = path.join(bdmvDir, 'STREAM');
-  const clipDir   = path.join(bdmvDir, 'CLIPINF');
-  const playDir   = path.join(bdmvDir, 'PLAYLIST');
-
-  // Ensure all directories exist
-  for (const d of [bdFolder, bdmvDir, streamDir, clipDir, playDir]) {
-    fs.mkdirSync(d, { recursive: true });
-    sendLog(`Created dir: ${d}`);
-  }
-
-  // Copy main feature → 00001.m2ts
-  // Prefer tsMuxeR's 00000.m2ts output (192-byte BD format) over main.ts (188-byte MPEG-TS)
-  const tsmOut = path.join(streamDir, '00000.m2ts');
-  const dest01 = path.join(streamDir, '00001.m2ts');
-  if (fs.existsSync(tsmOut) && fs.statSync(tsmOut).size > 10e6) {
-    fs.copyFileSync(tsmOut, dest01);
-    sendLog(`Copied tsMuxeR 00000.m2ts → 00001.m2ts (${(fs.statSync(dest01).size/1e6).toFixed(1)} MB) [BD-compliant 192-byte]`);
-  } else if (fs.existsSync(mainTs)) {
-    fs.copyFileSync(mainTs, dest01);
-    sendLog(`Warning: using main.ts → 00001.m2ts (188-byte fallback, may not play on hardware)`);
-  } else {
-    sendLog(`WARNING: neither tsMuxeR output nor main.ts found`);
-  }
-
-  // Minimal valid index.bdmv (INDX0100)
-  // Structure: TypeIndicator(8) + version(4) + AppInfoBDMV offset(4) + IndexTable offset(4)
-  const indexBuf = Buffer.alloc(112, 0);
-  indexBuf.write('INDX', 0, 'ascii');
-  indexBuf.write('0100', 4, 'ascii');
-  indexBuf.writeUInt32BE(112, 8);   // size
-  indexBuf.writeUInt32BE(96, 12);   // IndexTable_start_address (AppInfoBDMV_offset(56) + 4 + AppInfoBDMV_length(36))
-  indexBuf.writeUInt32BE(96, 16);   // IndexTable offset
-  // FirstPlayback object ref (type=1=HDMV, id_ref=0)
-  indexBuf[56] = 0x01;              // type = HDMV
-  indexBuf[57] = 0x00;
-  indexBuf.writeUInt16BE(0x0000, 58); // id_ref = 0
-  fs.writeFileSync(path.join(bdFolder, 'BDMV', 'index.bdmv'), indexBuf);
-
-  // Minimal MovieObject.bdmv (MOBJ0100)
-  const mobjBuf = Buffer.alloc(96, 0);
-  mobjBuf.write('MOBJ', 0, 'ascii');
-  mobjBuf.write('0200', 4, 'ascii');
-  mobjBuf.writeUInt32BE(96, 8);
-  mobjBuf.writeUInt32BE(40, 12);    // ExtensionData offset (none)
-  mobjBuf.writeUInt32BE(56, 16);    // MovieObjects start
-  mobjBuf.writeUInt32BE(1,  20);    // number of MovieObjects = 1
-  // MovieObject[0]: resume_intention=0, menu_call=0, title_search=0
-  // CommandTable: 1 command → PlayPL(1) = play 00001.mpls
-  mobjBuf.writeUInt16BE(0, 56);     // resume_intention_flag etc.
-  mobjBuf.writeUInt16BE(1, 58);     // num_navigation_commands = 1
-  mobjBuf.writeUInt32BE(0x50000001, 60); // cmd: PlayPL(1) → 00001.mpls
-  mobjBuf.writeUInt32BE(0x00000000, 64);
-  mobjBuf.writeUInt32BE(0x00000000, 68);
-  fs.writeFileSync(path.join(bdFolder, 'BDMV', 'MovieObject.bdmv'), mobjBuf);
-
-  // Minimal CLPI (clip info) for 00001
-  const clpi = Buffer.alloc(88, 0);
-  clpi.write('HDMV', 0, 'ascii');
-  clpi.write('0200', 4, 'ascii');
-  clpi.writeUInt32BE(88, 8);
-  fs.writeFileSync(path.join(clipDir, '00001.clpi'), clpi);
-
-  // Minimal MPLS (playlist) 00001
-  const mpls = Buffer.alloc(96, 0);
-  mpls.write('MPLS', 0, 'ascii');
-  mpls.write('0200', 4, 'ascii');
-  mpls.writeUInt32BE(96, 8);
-  mpls.writeUInt32BE(58, 12);       // PlayList start
-  mpls.writeUInt32BE(82, 16);       // PlayListMark start
-  // PlayList: 1 PlayItem
-  mpls.writeUInt16BE(1, 58);        // num_PlayItems
-  mpls.writeUInt16BE(0, 60);        // num_SubPaths
-  // PlayItem[0] — clip 00001, IN=0, OUT=0xFFFFFF
-  mpls.write('00001', 62, 'ascii');
-  mpls.write('M2TS', 67, 'ascii');
-  mpls.writeUInt32BE(0, 73);        // IN_time
-  mpls.writeUInt32BE(0xFFFFFF, 77); // OUT_time
-  fs.writeFileSync(path.join(playDir, '00001.mpls'), mpls);
-
-  // BACKUP copies
-  const backupDir = path.join(bdFolder, 'BDMV', 'BACKUP');
-  fs.mkdirSync(backupDir, { recursive: true });
-  fs.copyFileSync(path.join(bdFolder,'BDMV','index.bdmv'),       path.join(backupDir,'index.bdmv'));
-  fs.copyFileSync(path.join(bdFolder,'BDMV','MovieObject.bdmv'),  path.join(backupDir,'MovieObject.bdmv'));
-
-  return Promise.resolve();
-}
-
-
-// ── Multi-title navigation fix ────────────────────────────────────────────────
-// After processAdditionalTitle merges 00002.mpls, 00003.mpls, etc. into the
-// PLAYLIST directory, the index.bdmv and MovieObject.bdmv written by the main
-// tsMuxeR run still reference only 1 title.  This function regenerates both
-// files so that hardware BD players can navigate all N titles.
-//
-// Binary layout is derived from the existing writeFallbackBDMV structure and
-// scaled to N objects.  PlayPL(1) → 00001.mpls, PlayPL(2) → 00002.mpls, etc.
-
-function fixMultiTitleNavigation(bdFolder, titleCount) {
-  if (titleCount <= 1) return; // single title — tsMuxeR's files are already correct
-
-  const bdmvDir = path.join(bdFolder, 'BDMV');
-  const backDir = path.join(bdmvDir,  'BACKUP');
-  fs.mkdirSync(backDir, { recursive: true });
-
-  // Ensure every title has a standalone playlist file.
-  // When tsMuxeR runs with --custom-menu-bg it only writes 00000.mpls (the menu
-  // playlist); it does NOT create 00001.mpls for the main title.  Additional
-  // titles may also be missing their .mpls if tsMuxeR exited before producing
-  // one.  We create minimal-but-valid fallback playlists here so that the
-  // PlayPL(i) commands written below can always resolve to a real file.
-  const playDir = path.join(bdmvDir, 'PLAYLIST');
-  fs.mkdirSync(playDir, { recursive: true });
-  for (let i = 1; i <= titleCount; i++) {
-    const id = String(i).padStart(5, '0');
-    if (!fs.existsSync(path.join(playDir, `${id}.mpls`))) {
-      writeBdMpls(playDir, backDir, id);
-      sendLog(`fixMultiTitleNavigation: created missing playlist ${id}.mpls`);
-    }
-  }
-
-  // ── MovieObject.bdmv ───────────────────────────────────────────────────────
-  // Header: 56 bytes  (type + version + length + ext_start + obj_start + count + padding)
-  // Per object: 16 bytes  (2B flags + 2B num_cmds + 12B command)
-  const mobjSize = 56 + titleCount * 16;
-  const mobj = Buffer.alloc(mobjSize, 0);
-  mobj.write('MOBJ', 0, 'ascii');
-  mobj.write('0200', 4, 'ascii');
-  mobj.writeUInt32BE(mobjSize, 8);
-  mobj.writeUInt32BE(0,          12); // no ExtensionData
-  mobj.writeUInt32BE(56,         16); // MovieObjects_start
-  mobj.writeUInt32BE(titleCount, 20); // number_of_movie_objects
-  for (let i = 0; i < titleCount; i++) {
-    const off = 56 + i * 16;
-    mobj.writeUInt16BE(0x4000, off);                   // flags: menu_call_mask set (popup menu enabled)
-    mobj.writeUInt16BE(1, off + 2);                    // num_navigation_commands = 1
-    mobj.writeUInt32BE(0x50000001 + i, off + 4);       // PlayPL(i+1): plays 0000(i+1).mpls
-    mobj.writeUInt32BE(0, off + 8);                    // destination word
-    mobj.writeUInt32BE(0, off + 12);                   // source word
-  }
-  const mobjPath = path.join(bdmvDir, 'MovieObject.bdmv');
-  fs.writeFileSync(mobjPath, mobj);
-  fs.copyFileSync(mobjPath, path.join(backDir, 'MovieObject.bdmv'));
-
-  // ── index.bdmv ────────────────────────────────────────────────────────────
-  // Header (56 bytes) + AppInfoBDMV (40 bytes, at offset 56) +
-  // IndexTable (at offset 96): 2B num_titles + N × 4B entries
-  const indexSize = 98 + titleCount * 4;
-  const idx = Buffer.alloc(indexSize, 0);
-  idx.write('INDX', 0, 'ascii');
-  idx.write('0100', 4, 'ascii');
-  idx.writeUInt32BE(indexSize, 8);
-  idx.writeUInt32BE(96, 12); // IndexTable_start_address (AppInfoBDMV_offset(56) + 4 + AppInfoBDMV_length(36))
-  idx.writeUInt32BE(96, 16); // IndexTable_start
-  // AppInfoBDMV: FirstPlayback → Object 0
-  idx[56] = 0x01;            // object_type = HDMV
-  idx[57] = 0x00;
-  idx.writeUInt16BE(0, 58);  // hdmv_id_ref = 0 (first object)
-  // TopMenu: none (bytes 60–95 remain zero)
-  // IndexTable
-  idx.writeUInt16BE(titleCount, 96); // number_of_titles
-  for (let i = 0; i < titleCount; i++) {
-    const off = 98 + i * 4;
-    idx.writeUInt16BE(0x8000, off);  // title_type = HDMV movie
-    idx.writeUInt16BE(i, off + 2);   // hdmv_id_ref = object i
-  }
-  const idxPath = path.join(bdmvDir, 'index.bdmv');
-  fs.writeFileSync(idxPath, idx);
-  fs.copyFileSync(idxPath, path.join(backDir, 'index.bdmv'));
-
-  sendLog(`Multi-title navigation updated: ${titleCount} titles in index.bdmv + MovieObject.bdmv`);
 }
 
 // ── Validate mux output ───────────────────────────────────────────────────────
@@ -2682,36 +2554,93 @@ function validateMuxOutput(tsDir) {
   });
 }
 
-// ── Step 7: Package ISO with hdiutil ──────────────────────────────────────────
+// ── Step 6.5: Pre-burn validation ───
+// Runs before ISO creation to catch structural problems early.
+
+function validateHwBuild(project, workDir, bdFolder) {
+  return new Promise((resolve, reject) => {
+    sendLog('Pre-burn validation checklist');
+    const errors = [];
+
+    const check = (label, ok) => {
+      sendLog(`  ${ok ? '✓' : '✗'} ${label}`);
+      if (!ok) errors.push(label);
+    };
+
+    // Required BD folder/file structure
+    check('BDMV folder exists',                   fs.existsSync(path.join(bdFolder, 'BDMV')));
+    check('CERTIFICATE folder exists',            fs.existsSync(path.join(bdFolder, 'CERTIFICATE')));
+    check('BDMV/index.bdmv exists',               fs.existsSync(path.join(bdFolder, 'BDMV', 'index.bdmv')));
+    check('BDMV/MovieObject.bdmv exists',         fs.existsSync(path.join(bdFolder, 'BDMV', 'MovieObject.bdmv')));
+
+    const streamDir  = path.join(bdFolder, 'BDMV', 'STREAM');
+    const playlistDir = path.join(bdFolder, 'BDMV', 'PLAYLIST');
+    const clipinfDir  = path.join(bdFolder, 'BDMV', 'CLIPINF');
+
+    const streamFiles   = fs.existsSync(streamDir)   ? fs.readdirSync(streamDir).filter(f => f.toLowerCase().endsWith('.m2ts'))  : [];
+    const playlistFiles = fs.existsSync(playlistDir) ? fs.readdirSync(playlistDir).filter(f => f.toLowerCase().endsWith('.mpls')) : [];
+    const clipinfFiles  = fs.existsSync(clipinfDir)  ? fs.readdirSync(clipinfDir).filter(f => f.toLowerCase().endsWith('.clpi'))  : [];
+
+    check(`BDMV/STREAM contains at least one .m2ts (found: ${streamFiles.length})`,   streamFiles.length > 0);
+    check(`BDMV/PLAYLIST contains at least one .mpls (found: ${playlistFiles.length})`, playlistFiles.length > 0);
+    check(`BDMV/CLIPINF contains at least one .clpi (found: ${clipinfFiles.length})`,   clipinfFiles.length > 0);
+
+    // Verify safe build flags and ISO method
+    check('Passthrough mode disabled',           !project.passThroughMode);
+    check('Force transcode enabled',             !!project.forceTranscode);
+    check('ISO method available',                  bestIsoMethod !== null);
+
+    // Verify safe build suppressed menu/extras/additional titles
+    check('Menu generation disabled',       !fs.existsSync(path.join(workDir, 'menu_bg.png')));
+    check('No extras',                      (project.extras || []).length === 0);
+    check('No additional titles',           (project.titles || []).length === 0);
+
+    // Verify tsMuxeR meta declares A_AC3 audio and H.264/AVC video
+    const metaFile = path.join(workDir, 'tsmuxer.meta');
+    if (fs.existsSync(metaFile)) {
+      const metaContent = fs.readFileSync(metaFile, 'utf8');
+      const hasAVC  = metaContent.includes('V_MPEG4/ISO/AVC');
+      const hasAC3  = metaContent.includes('A_AC3');
+      const hasDTS  = metaContent.includes('A_DTS');
+      check('tsMuxeR meta declares H.264/AVC video (V_MPEG4/ISO/AVC)',  hasAVC);
+      check('tsMuxeR meta declares AC3 audio (A_AC3)',                  hasAC3);
+      if (hasDTS) {
+        sendLog('WARNING: tsMuxeR meta contains A_DTS — expected only A_AC3');
+        errors.push('tsMuxeR meta contains unexpected A_DTS');
+      }
+    } else {
+      sendLog('WARNING: tsmuxer.meta not found — skipping codec checks');
+    }
+
+    if (errors.length > 0) {
+      return reject(new Error(
+        `Pre-burn validation failed — ${errors.length} issue(s):\n\n` +
+        errors.map(e => `  • ${e}`).join('\n')
+      ));
+    }
+    sendLog('  All pre-burn checks passed.');
+    resolve();
+  });
+}
+
+// ── Step 7: Package ISO ────────────────────────────────────────────────────────
+// Uses bestIsoMethod detected at startup — no per-build detection.
 
 function packageISO(bdFolder, outputDir, discName) {
   const { execFile } = require('child_process');
   return new Promise((resolve, reject) => {
 
-    // Always show paths in error for debugging
     const debugInfo = `bdFolder="${bdFolder}" outputDir="${outputDir}" discName="${discName}"`;
-    sendLog('packageISO: ' + debugInfo);
 
-    if (!bdFolder || bdFolder.trim() === '') {
-      return reject(new Error(`bdFolder is empty!\n${debugInfo}`));
-    }
+    if (!bdFolder || bdFolder.trim() === '') return reject(new Error(`bdFolder is empty!\n${debugInfo}`));
 
-    const bdmvDir = path.join(bdFolder, 'BDMV');
+    const bdmvDir    = path.join(bdFolder, 'BDMV');
     const bdExists   = fs.existsSync(bdFolder);
     const bdmvExists = fs.existsSync(bdmvDir);
-    let contents = 'N/A';
-    if (bdExists) {
-      try { contents = fs.readdirSync(bdFolder).join(', ') || '(empty)'; } catch(e) { contents = e.message; }
-    }
-
-    sendLog(`bdFolder exists: ${bdExists}, contents: ${contents}`);
-    sendLog(`BDMV exists: ${bdmvExists}`);
-
-    if (!bdExists) {
-      return reject(new Error(`BD source folder does not exist:\n${bdFolder}\n\n${debugInfo}`));
-    }
+    if (!bdExists)   return reject(new Error(`BD source folder does not exist:\n${bdFolder}`));
     if (!bdmvExists) {
-      return reject(new Error(`BDMV subfolder missing.\nFolder contents: ${contents}\n\n${debugInfo}`));
+      const contents = bdExists ? (fs.readdirSync(bdFolder).join(', ') || '(empty)') : 'N/A';
+      return reject(new Error(`BDMV subfolder missing. Folder contents: ${contents}`));
     }
 
     try { fs.mkdirSync(outputDir, { recursive: true }); } catch(e) {
@@ -2720,26 +2649,253 @@ function packageISO(bdFolder, outputDir, discName) {
 
     const isoPath = path.join(outputDir, `${discName}.iso`);
     try { if (fs.existsSync(isoPath)) fs.unlinkSync(isoPath); } catch(_) {}
+    const volName = (discName.toUpperCase().replace(/[^A-Z0-9_]/g,'_')).slice(0,32) || 'DISC';
 
-    const volName = (discName.toUpperCase().replace(/[^A-Z0-9]/g,'_')).slice(0,32) || 'DISC';
-    sendLog(`ISO path: ${isoPath}  volName: ${volName}`);
+    // Ensure CERTIFICATE dir exists at disc root
+    const certDir = path.join(bdFolder, 'CERTIFICATE');
+    if (!fs.existsSync(certDir)) {
+      fs.mkdirSync(certDir, { recursive: true });
+      sendLog('Created missing CERTIFICATE directory');
+    }
 
-    const hdiArgs = ['makehybrid', '-o', isoPath, '-udf', '-udf-volume-name', volName, '-joliet', '-iso', bdFolder];
-    sendLog('Running: hdiutil ' + hdiArgs.join(' '));
+    sendLog(`Creating ISO — method: ${bestIsoMethod} — ${isoPath}`);
 
-    execFile('/usr/bin/hdiutil', hdiArgs, { maxBuffer: 100 * 1024 * 1024 }, (err, stdout, stderr) => {
-      if (err) {
-        reject(new Error(
-          `hdiutil failed (code ${err.code}):\n${(stderr||stdout||err.message).slice(0,1000)}\n\n${debugInfo}`
-        ));
-      } else {
-        const size = fs.existsSync(isoPath) ? `${(fs.statSync(isoPath).size/1e9).toFixed(2)} GB` : '?';
-        sendLog(`✓ ISO created: ${isoPath} (${size})`);
-        resolve();
-      }
-    });
+    const finish = (err, usedUdf250) => {
+      if (err) return reject(err);
+      const size = fs.existsSync(isoPath) ? `${(fs.statSync(isoPath).size/1e9).toFixed(2)} GB` : '?';
+      sendLog(`ISO created: ${isoPath} (${size})`);
+      resolve({ usedUdf250 });
+    };
+
+    if (bestIsoMethod === 'xorriso-udf250') {
+      const args = ['-as', 'mkisofs', '-udf', '-udfver', '2.50', '-V', volName, '-o', isoPath, bdFolder];
+      sendLog('xorriso -as mkisofs -udf -udfver 2.50');
+      execFile(TOOLS.xorriso, args, { maxBuffer: 200 * 1024 * 1024 }, (err, _out, stderr) => {
+        if (err) return finish(new Error(`xorriso failed:\n${(stderr || err.message).slice(0,800)}`), false);
+        finish(null, true);
+      });
+    } else if (bestIsoMethod === 'xorriso-native') {
+      const args = ['-outdev', `stdio:${isoPath}`, '-map', bdFolder, '/', '-volid', volName, '-commit'];
+      sendLog('xorriso native mode');
+      execFile(TOOLS.xorriso, args, { maxBuffer: 200 * 1024 * 1024 }, (err, _out, stderr) => {
+        if (err) return finish(new Error(`xorriso failed:\n${(stderr || err.message).slice(0,800)}`), false);
+        finish(null, false);
+      });
+    } else {
+      return reject(new Error('No ISO tool available. Install xorriso: brew install xorriso'));
+    }
   });
 }
+
+// ── IPC: combine episodes ─────────────────────────────────────────────────────
+
+ipcMain.handle('combine-episodes', async (_, { files, normalizeBeforeCombine }) => {
+  if (!TOOLS.ffmpeg)  return { error: 'ffmpeg not found — install with: brew install ffmpeg' };
+  if (!TOOLS.ffprobe) return { error: 'ffprobe not found — install with: brew install ffmpeg' };
+  if (!files || files.length < 2) return { error: 'Need at least 2 episode files' };
+
+  const combineDir = (() => {
+    const candidates = [
+      '/Volumes/Internal SSD/.discforge_combine',
+      '/Volumes/Samsung USB/.discforge_combine',
+      path.join(os.homedir(), '.discforge_combine'),
+    ];
+    for (const c of candidates) {
+      try {
+        const parent = path.dirname(c);
+        if (fs.existsSync(parent)) { fs.mkdirSync(c, { recursive: true }); return c; }
+      } catch(_) {}
+    }
+    return path.join(os.tmpdir(), 'discforge_combine');
+  })();
+
+  const probeEpisode = (filePath) => new Promise(resolve => {
+    const proc = spawn(TOOLS.ffprobe, [
+      '-v', 'quiet', '-print_format', 'json',
+      '-show_format', '-show_streams', filePath,
+    ]);
+    let out = '';
+    proc.stdout.on('data', d => out += d);
+    proc.on('close', () => {
+      try {
+        const parsed = JSON.parse(out);
+        const videoStream = (parsed.streams || []).find(s => s.codec_type === 'video');
+        const firstAudio  = (parsed.streams || []).find(s => s.codec_type === 'audio');
+        const audioCount  = (parsed.streams || []).filter(s => s.codec_type === 'audio').length;
+        resolve({
+          duration:      parseFloat(parsed.format?.duration || 0),
+          videoCodec:    videoStream?.codec_name   || null,
+          width:         videoStream?.width         || null,
+          height:        videoStream?.height        || null,
+          rFrameRate:    videoStream?.r_frame_rate  || null,
+          pixFmt:        videoStream?.pix_fmt       || null,
+          audioCount,
+          audioCodec:    firstAudio?.codec_name     || null,
+          audioChannels: firstAudio?.channels       || null,
+        });
+      } catch(_) {
+        resolve({ duration: 0, videoCodec: null, width: null, height: null, rFrameRate: null, pixFmt: null, audioCount: 0, audioCodec: null, audioChannels: null });
+      }
+    });
+    proc.on('error', () => resolve({ duration: 0, videoCodec: null, width: null, height: null, rFrameRate: null, pixFmt: null, audioCount: 0, audioCodec: null, audioChannels: null }));
+  });
+
+  const parseFps = (rFrameRate) => {
+    if (!rFrameRate) return 0;
+    const parts = rFrameRate.split('/');
+    if (parts.length === 2) return parseFloat(parts[0]) / parseFloat(parts[1]);
+    return parseFloat(rFrameRate) || 0;
+  };
+
+  sendLog('[COMBINE] Probing episode streams…');
+  const probeResults = [];
+  for (const f of files) {
+    const info = await probeEpisode(f.path);
+    probeResults.push(info);
+    sendLog(`[COMBINE] ${f.name}: ${info.duration.toFixed(3)}s  codec=${info.videoCodec}  ${info.width}x${info.height}  fps=${info.rFrameRate}  pix_fmt=${info.pixFmt}  audio=${info.audioCount}  audioCodec=${info.audioCodec}  audioChannels=${info.audioChannels}`);
+  }
+
+  const ref = probeResults[0];
+  if (!normalizeBeforeCombine) {
+    for (let i = 1; i < probeResults.length; i++) {
+      const ep = probeResults[i];
+      const epNum = i + 1;
+      if (ep.videoCodec !== ref.videoCodec) {
+        return { error: `Cannot combine: episodes have different video codecs (episode 1: ${ref.videoCodec}, episode ${epNum}: ${ep.videoCodec}). All episodes must use the same codec.` };
+      }
+      if (ep.width !== ref.width || ep.height !== ref.height) {
+        return { error: `Cannot combine: episodes have different resolutions (episode 1: ${ref.width}x${ref.height}, episode ${epNum}: ${ep.width}x${ep.height}). All episodes must have the same resolution.` };
+      }
+      if (Math.abs(parseFps(ep.rFrameRate) - parseFps(ref.rFrameRate)) > 0.1) {
+        return { error: `Cannot combine: episodes have different frame rates. All episodes must have the same FPS.` };
+      }
+      if (ep.audioCodec !== ref.audioCodec) {
+        return { error: `Cannot combine: episodes have different audio codecs (episode 1: ${ref.audioCodec}, episode ${epNum}: ${ep.audioCodec}). All episodes must use the same audio codec.` };
+      }
+      if (ep.audioChannels !== ref.audioChannels) {
+        return { error: `Cannot combine: episodes have different audio channel counts (episode 1: ${ref.audioChannels}ch, episode ${epNum}: ${ep.audioChannels}ch). All episodes must have the same channel layout.` };
+      }
+      if (ep.pixFmt !== ref.pixFmt) {
+        return { error: `Cannot combine: episodes have different pixel formats (episode 1: ${ref.pixFmt}, episode ${epNum}: ${ep.pixFmt}). All episodes must have the same pixel format.` };
+      }
+    }
+    sendLog(`[COMBINE] Validation passed: codec=${ref.videoCodec} ${ref.width}x${ref.height} fps=${ref.rFrameRate} pix_fmt=${ref.pixFmt} audioCodec=${ref.audioCodec} audioChannels=${ref.audioChannels}ch audio=${ref.audioCount}`);
+  } else {
+    sendLog(`[COMBINE] Normalize mode — skipping stream-match validation`);
+  }
+
+  const durations = probeResults.map(r => r.duration);
+
+  let sourceFiles = files;
+
+  if (normalizeBeforeCombine) {
+    // Determine shared BD-Video target from source FPS of first episode
+    const firstFpsNum = parseFps(probeResults[0].rFrameRate || '24000/1001');
+    const bdTarget   = selectHwResAndFps(firstFpsNum || 23.976, probeResults[0].height);
+    const targetW    = bdTarget.w;
+    const targetH    = bdTarget.h;
+    const targetFps  = getBdFpsFraction(bdTarget.fps);
+    const targetFpsNum = bdTarget.fps;
+    const gopSize    = Math.round(targetFpsNum);
+    const targetLevel = targetH <= 480 ? '3.1' : targetH <= 720 ? '4.0' : '4.1';
+    const targetBrV   = targetH <= 720 ? '8000k'  : '15000k';
+    const targetMaxR  = targetH <= 720 ? '15000k' : '25000k';
+    const targetBufS  = targetH <= 720 ? '20000k' : '30000k';
+    sendLog(`[NORMALIZE] Shared target: ${targetW}x${targetH} @ ${targetFps}, H.264 high L${targetLevel}, AC3 640k 48kHz stereo`);
+    sendLog(`[NORMALIZE] Audio: selecting track 1 of ${probeResults[0].audioCount ?? '?'} (first track only — one audio track per episode for clean concat)`);
+
+    const normalizedFiles = [];
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i];
+      sendLog(`[NORMALIZE] Episode ${i + 1} of ${files.length}: ${f.name}`);
+      const normPath = path.join(combineDir, `norm_${i}_${Date.now()}.ts`);
+      const normResult = await new Promise(resolve => {
+        const proc = spawn(TOOLS.ffmpeg, [
+          '-y', '-i', f.path,
+          '-map', '0:v:0', '-map', '0:a:0',
+          '-c:v', 'libx264', '-preset', 'slow', '-profile:v', 'high', '-level', targetLevel,
+          '-pix_fmt', 'yuv420p',
+          '-crf', '20',
+          '-vf', `scale=${targetW}:${targetH}:force_original_aspect_ratio=decrease,pad=${targetW}:${targetH}:(ow-iw)/2:(oh-ih)/2,fps=${targetFps}`,
+          '-g', String(gopSize), '-keyint_min', String(gopSize), '-sc_threshold', '0', '-bf', '3', '-refs', '4',
+          '-maxrate', targetMaxR, '-bufsize', targetBufS,
+          '-c:a', 'ac3', '-b:a', '640k', '-ar', '48000', '-ac', '2',
+          normPath,
+        ]);
+        let stderr = '';
+        proc.stderr.on('data', d => {
+          const line = d.toString();
+          stderr += line;
+          if (line.includes('time=') || line.includes('size=')) sendLog('[NORMALIZE] ' + line.trim());
+        });
+        proc.on('close', code => {
+          if (code === 0) resolve({ success: true, path: normPath });
+          else resolve({ error: `ffmpeg normalize failed for episode ${i + 1} (exit ${code}):\n${stderr.slice(-600)}` });
+        });
+        proc.on('error', err => resolve({ error: 'ffmpeg error: ' + err.message }));
+      });
+      if (normResult.error) return normResult;
+      normalizedFiles.push({ path: normPath, name: f.name });
+    }
+    sourceFiles = normalizedFiles;
+  }
+
+  const concatListPath = path.join(combineDir, 'concat_list.txt');
+  const concatLines = sourceFiles.map(f => `file '${f.path.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`);
+  fs.writeFileSync(concatListPath, concatLines.join('\n') + '\n');
+
+  const combinedName = 'combined_' + Date.now() + '.ts';
+  const combinedPath = path.join(combineDir, combinedName);
+
+  sendLog('[COMBINE] Running ffmpeg concat…');
+  const concatResult = await new Promise(resolve => {
+    const proc = spawn(TOOLS.ffmpeg, [
+      '-y', '-f', 'concat', '-safe', '0',
+      '-i', concatListPath,
+      '-c', 'copy',
+      combinedPath,
+    ]);
+    let stderr = '';
+    proc.stderr.on('data', d => {
+      const line = d.toString();
+      stderr += line;
+      if (line.includes('time=') || line.includes('size=')) sendLog('[COMBINE] ' + line.trim());
+    });
+    proc.on('close', code => {
+      if (code === 0) resolve({ success: true });
+      else resolve({ error: `ffmpeg concat failed (exit ${code}):\n${stderr.slice(-600)}` });
+    });
+    proc.on('error', err => resolve({ error: 'ffmpeg error: ' + err.message }));
+  });
+
+  if (concatResult.error) return concatResult;
+
+  const episodes = files.map((f, i) => ({
+    path: f.path,
+    name: f.name.replace(/\.[^.]+$/, ''),
+    duration: durations[i],
+  }));
+
+  const chapters = [];
+  let cumSecs = 0;
+  episodes.forEach((ep, i) => {
+    const h = Math.floor(cumSecs / 3600);
+    const m = Math.floor((cumSecs % 3600) / 60);
+    const s = Math.floor(cumSecs % 60);
+    chapters.push({
+      name: 'Episode ' + (i + 1),
+      time: String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0'),
+    });
+    cumSecs += ep.duration;
+  });
+
+  sendLog(`[COMBINE] Done — ${files.length} episodes → ${combinedPath}`);
+  sendLog(`[COMBINE] Created one Blu-ray-safe main feature from ${files.length} episodes.`);
+  if (normalizeBeforeCombine) sendLog('[COMBINE] Episodes were normalized before combining.');
+  sendLog('[COMBINE] Episode starts were added as chapter markers.');
+  sendLog('[COMBINE] This is not a separate-title TV Blu-ray.');
+  return { success: true, combinedPath, combinedName, episodes, chapters };
+});
 
 // ── Chapter metadata file (FFMETADATA format) ────────────────────────────────
 
@@ -2819,3 +2975,537 @@ function timeToMs(t) {
   if (p.length === 2) return ((p[0]*60)+p[1])*1000;
   return p[0]*1000;
 }
+
+// ── Multi-title navigation fix ────────────────────────────────────────────────
+// Extends tsMuxeR-generated MovieObject.bdmv and index.bdmv to register N
+// episode titles.  Episode 1 is at playlist 00001.mpls (PlayList ID 1).
+// Episodes 2..N are at 00002.mpls .. 000N.mpls (IDs 2..N).
+//
+// tsMuxeR's single-title BDMV already has 3 objects:
+//   obj[0]: first-play (chains to obj[2])
+//   obj[1]: chapter/menu handler
+//   obj[2]: PlayPL(X) — X is 0 if tsMuxeR used 00000.mpls, 1 if it used 00001.mpls
+//
+// We always want obj[2] to reference playlist 1 (00001.mpls = episode 1 final).
+// Then we add objects 3..N+1 for episodes 2..N, each PlayPL(i).
+// index.bdmv gets N-1 additional title entries pointing to these new objects.
+
+function fixMultiTitleNavigationForEpisodes(bdFolder, numEpisodes, ep1TsMuxerPrefix) {
+  if (numEpisodes <= 1) return;
+
+  const mobjPath  = path.join(bdFolder, 'BDMV', 'MovieObject.bdmv');
+  const indexPath = path.join(bdFolder, 'BDMV', 'index.bdmv');
+  const backDir   = path.join(bdFolder, 'BDMV', 'BACKUP');
+  const N = numEpisodes;
+
+  if (!fs.existsSync(mobjPath) || !fs.existsSync(indexPath)) {
+    sendLog('[MT] fixNav: navigation files not found — skipping');
+    return;
+  }
+
+  // ── 1. MovieObject.bdmv: patch obj[2] to PlayPL(1), append N-1 new objects ──
+  // tsMuxeR generates obj[0] first-play, obj[1] chapter handler, obj[2] PlayPL(0).
+  // The merge step renames EP1's playlist 00000.mpls → 00001.mpls, so PlayPL(0)
+  // now points at nothing. Patch obj[2] to PlayPL(1) = EP1, then append N-1 new
+  // objects for EP2..EPN (PlayPL(2)..PlayPL(N)). tsMuxeR's existing Title 1 →
+  // obj[2] covers EP1; we only add entries for EP2..EPN.
+  const mobjBuf = Buffer.from(fs.readFileSync(mobjPath));
+  sendLog(`[MT] fixNav: MovieObject.bdmv before — ${mobjBuf.length} bytes, first 128 hex: ${mobjBuf.slice(0, 128).toString('hex')}`);
+
+  const MOBJ_STRUCT_OFF = 40;
+  const NUM_OBJS_OFF    = 48;
+
+  const mobjLength = mobjBuf.readUInt32BE(MOBJ_STRUCT_OFF);
+  const numObjs    = mobjBuf.readUInt16BE(NUM_OBJS_OFF);
+
+  // Walk objects to find obj[2] — the PlayPL template; track its buffer position
+  let pos = NUM_OBJS_OFF + 2;
+  let templateObjBytes = null;
+  let obj2Pos = 0;
+  for (let i = 0; i < numObjs; i++) {
+    const numCmds = mobjBuf.readUInt16BE(pos + 2);
+    const objSize = 4 + numCmds * 12;
+    if (i === 2) { templateObjBytes = mobjBuf.slice(pos, pos + objSize); obj2Pos = pos; }
+    pos += objSize;
+  }
+
+  if (!templateObjBytes) {
+    sendLog(`[MT] fixNav: expected ≥3 movie objects, found ${numObjs} — skipping`);
+    return;
+  }
+
+  const tmplNumCmds = templateObjBytes.readUInt16BE(2);
+  const lastCmdOff  = 4 + (tmplNumCmds - 1) * 12;
+  const playPlW0    = templateObjBytes.readUInt32BE(lastCmdOff);
+  const playPlW1    = templateObjBytes.readUInt32BE(lastCmdOff + 4);
+
+  if (playPlW0 !== 0x21810000 || playPlW1 !== 0) {
+    sendLog(`[MT] fixNav: template obj[2] last cmd unexpected (w0=0x${playPlW0.toString(16)} w1=${playPlW1}) — skipping`);
+    return;
+  }
+
+  // Patch obj[2]: PlayPL(0) → PlayPL(1) because EP1's playlist was renamed during merge
+  mobjBuf.writeUInt32BE(1, obj2Pos + lastCmdOff + 4);
+  sendLog('[MT] fixNav: patched obj[2] PlayPL(0) → PlayPL(1) (EP1 mpls renamed during merge)');
+
+  // Append N-1 new objects for EP2..EPN: PlayPL(2), PlayPL(3), ..., PlayPL(N)
+  const newObjBufs = [];
+  for (let i = 0; i < N - 1; i++) {
+    const playlistId = i + 2;  // EP2..EPN
+    const newObj = Buffer.from(templateObjBytes);
+    newObj.writeUInt32BE(playlistId, lastCmdOff + 4);
+    newObjBufs.push(newObj);
+    sendLog(`[MT] fixNav: mobj obj[${numObjs + i}] → PlayPL(${playlistId})`);
+  }
+
+  const totalNewObjBytes = newObjBufs.reduce((s, b) => s + b.length, 0);
+  const newMobjBuf = Buffer.concat([mobjBuf, ...newObjBufs]);
+  newMobjBuf.writeUInt32BE(mobjLength + totalNewObjBytes, MOBJ_STRUCT_OFF);
+  newMobjBuf.writeUInt16BE(numObjs + (N - 1), NUM_OBJS_OFF);
+
+  fs.writeFileSync(mobjPath, newMobjBuf);
+  sendLog(`[MT] fixNav: MovieObject.bdmv ${numObjs}→${numObjs + (N - 1)} objects, ${mobjBuf.length}→${newMobjBuf.length} bytes`);
+  sendLog(`[MT] fixNav: MovieObject.bdmv after — ${newMobjBuf.length} bytes, first 128 hex: ${newMobjBuf.slice(0, 128).toString('hex')}`);
+
+  // ── 2. index.bdmv: read tsMuxeR file, append N-1 title entries ─────────────
+  // tsMuxeR's existing Title 1 → obj[2] covers EP1. Add entries for EP2..EPN only.
+  const idxBuf       = Buffer.from(fs.readFileSync(indexPath));
+  sendLog(`[MT] fixNav: index.bdmv before — ${idxBuf.length} bytes, first 128 hex: ${idxBuf.slice(0, 128).toString('hex')}`);
+
+  const idxStart     = idxBuf.readUInt32BE(8);   // IndexesStartAddress
+  const idxLen       = idxBuf.readUInt32BE(idxStart);
+  const idxDataStart = idxStart + 4;
+
+  const NUM_TITLES_OFF = idxDataStart + 8;
+  const TITLES_OFF     = idxDataStart + 10;
+
+  const curNumTitles = idxBuf.readUInt16BE(NUM_TITLES_OFF);
+  const newNumTitles = curNumTitles + (N - 1);
+
+  const newEntries = Buffer.alloc((N - 1) * 4);
+  for (let i = 0; i < N - 1; i++) {
+    const movieObjIdx = numObjs + i;
+    newEntries[i * 4 + 0] = 0x40;
+    newEntries[i * 4 + 1] = 0x00;
+    newEntries.writeUInt16BE(movieObjIdx, i * 4 + 2);
+    sendLog(`[MT] fixNav: index Title[${curNumTitles + i}] → MovieObject[${movieObjIdx}] (PlayPL(${i + 2}))`);
+  }
+
+  const remainingSlots = Math.floor((idxLen - 10 - curNumTitles * 4) / 4);
+  let newIdxBuf;
+  if (N - 1 <= remainingSlots) {
+    newIdxBuf = Buffer.from(idxBuf);
+    newIdxBuf.writeUInt16BE(newNumTitles, NUM_TITLES_OFF);
+    newEntries.copy(newIdxBuf, TITLES_OFF + curNumTitles * 4);
+  } else {
+    const extraBytes = ((N - 1) - remainingSlots) * 4;
+    newIdxBuf = Buffer.concat([idxBuf, Buffer.alloc(extraBytes)]);
+    newIdxBuf.writeUInt32BE(idxLen + extraBytes, idxStart);
+    newIdxBuf.writeUInt16BE(newNumTitles, NUM_TITLES_OFF);
+    newEntries.copy(newIdxBuf, TITLES_OFF + curNumTitles * 4);
+    sendLog(`[MT] fixNav: extended index.bdmv by ${extraBytes} bytes`);
+  }
+
+  fs.writeFileSync(indexPath, newIdxBuf);
+  sendLog(`[MT] fixNav: index.bdmv NumberOfTitles ${curNumTitles}→${newNumTitles}, ${idxBuf.length}→${newIdxBuf.length} bytes`);
+  sendLog(`[MT] fixNav: index.bdmv after — ${newIdxBuf.length} bytes, first 128 hex: ${newIdxBuf.slice(0, 128).toString('hex')}`);
+
+  // ── 3. BACKUP copies ────────────────────────────────────────────────────────
+  if (fs.existsSync(backDir)) {
+    try {
+      fs.copyFileSync(mobjPath,  path.join(backDir, 'MovieObject.bdmv'));
+      fs.copyFileSync(indexPath, path.join(backDir, 'index.bdmv'));
+      sendLog('[MT] fixNav: BACKUP copies updated');
+    } catch (_) {}
+  }
+}
+
+// ── IPC: build multi-title disc ───────────────────────────────────────────────
+// Each episode becomes a separately selectable title on the disc.
+// Pipeline per episode: FFmpeg (libx264/AC3) → mkvmerge → tsMuxeR (--blu-ray)
+// Then merge all BDMV outputs and fix navigation.
+
+ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discName, fastEncode }) => {
+  if (!TOOLS.ffmpeg)   return { error: 'FFmpeg not found.\n\nInstall: brew install ffmpeg' };
+  if (!TOOLS.tsmuxer)  return { error: 'tsMuxeR not found.\n\nInstall: brew install --cask tsmuxer' };
+  if (!TOOLS.mkvmerge) return { error: 'mkvmerge not found.\n\nInstall: brew install mkvtoolnix' };
+  if (!episodes || episodes.length < 2) return { error: 'Need at least 2 episode files.' };
+
+  for (const ep of episodes) {
+    if (!ep.path || !fs.existsSync(ep.path)) {
+      return { error: `Episode file not found:\n${ep.path || '(no path)'}` };
+    }
+  }
+
+  const homeDir  = os.homedir();
+  const outDir   = (outputDir && outputDir.length > 1) ? outputDir : path.join(homeDir, 'Desktop');
+  const name     = sanitize(discName || 'Episodes');
+  const tempBase = fs.existsSync(outDir) ? outDir : os.tmpdir();
+  const workDir  = path.join(tempBase, `discforge_mt_${Date.now()}`);
+  const bdFolder = path.join(workDir, 'BDMV_ROOT');
+  const isoPath  = path.join(outDir, `${name}.iso`);
+
+  // ── Pre-flight 1: ISO method ───────────────────────────────────────────────
+  if (bestIsoMethod === null) await probeIsoMethod();
+  if (bestIsoMethod === null) {
+    return { error: 'No ISO tool available.\n\nInstall xorriso: brew install xorriso' };
+  }
+  sendLog(`[MT] Pre-flight: ISO method OK — ${bestIsoMethod}`);
+
+  // ── Pre-flight 2: disk space ───────────────────────────────────────────────
+  try {
+    const { execSync } = require('child_process');
+    const totalInputBytes = episodes.reduce((sum, ep) => {
+      try { return sum + fs.statSync(ep.path).size; } catch(_) { return sum; }
+    }, 0);
+    const neededBytes = totalInputBytes * 2.5;
+    const dfOut = execSync(`df -k "${outDir}" 2>/dev/null || df -k "${homeDir}"`).toString();
+    const dfLine = dfOut.trim().split('\n').pop();
+    const availKb = parseInt(dfLine.trim().split(/\s+/)[3]) || 0;
+    const availBytes = availKb * 1024;
+    const availGb  = (availBytes  / 1e9).toFixed(1);
+    const neededGb = (neededBytes / 1e9).toFixed(1);
+    sendLog(`[MT] Pre-flight: disk space — ${availGb} GB available, ${neededGb} GB estimated needed`);
+    if (availBytes < neededBytes) {
+      return { error: `Not enough disk space.\n\nAvailable: ${availGb} GB\nEstimated needed: ${neededGb} GB\n\nFree up space on your drive and try again.` };
+    }
+  } catch(_) {}
+
+  // ── Pre-flight 3: estimated output size vs BD media capacity ──────────────
+  // fastEncode: videotoolbox target 15000k (1080p) / 8000k (720p).
+  // CRF20:      ~10 Mbps (1080p), ~6 Mbps (720p), ~3 Mbps (480p). +AC3 640 kbps.
+  try {
+    let totalEstBytes = 0;
+    for (const ep of episodes) {
+      const dur = getVideoDuration(ep.path);
+      const res = detectResolution(ep.path);
+      const h   = res.h || 1080;
+      const videoBitrate = fastEncode
+        ? (h > 720 ? 15e6 : 8e6)
+        : (h > 720 ? 10e6 : h > 480 ? 6e6 : 3e6);
+      totalEstBytes += (videoBitrate + 640e3) / 8 * dur;
+    }
+    const estGb = (totalEstBytes / 1e9).toFixed(1);
+    sendLog(`[MT] Pre-flight: estimated output size ~${estGb} GB`);
+    if (totalEstBytes > 47e9) {
+      sendLog(`[MT] Pre-flight: WARNING — estimated size (${estGb} GB) exceeds BD-50 capacity (47 GB). Disc may not fit on a single BD-50.`);
+    } else if (totalEstBytes > 23e9) {
+      sendLog(`[MT] Pre-flight: WARNING — estimated size (${estGb} GB) exceeds BD-25 capacity (23 GB). Use a BD-50 disc.`);
+    }
+  } catch(_) {}
+
+  try {
+    fs.mkdirSync(workDir,  { recursive: true });
+    fs.mkdirSync(bdFolder, { recursive: true });
+    fs.mkdirSync(outDir,   { recursive: true });
+  } catch(e) {
+    return { error: `Cannot create working directories:\n${e.message}` };
+  }
+
+  sendLog(`[MT] ─────────────────────────────────────────`);
+  sendLog(`[MT] Multi-title disc: ${episodes.length} episodes`);
+  sendLog(`[MT] workDir:   ${workDir}`);
+  sendLog(`[MT] bdFolder:  ${bdFolder}`);
+  sendLog(`[MT] isoPath:   ${isoPath}`);
+  if (fastEncode) {
+    sendLog('[MT] WARNING: fastEncode selected — h264_videotoolbox (experimental). VideoToolbox ignores -sc_threshold and -refs; output SPS/PPS may not pass strict BD compliance checks.');
+  }
+
+  const pad = n => String(n).padStart(5, '0');
+  const epBdFolders = [];
+
+  // ── Per-episode pipeline ────────────────────────────────────────────────────
+  for (let i = 0; i < episodes.length; i++) {
+    const ep    = episodes[i];
+    const epNum = i + 1;
+    const epDir   = path.join(workDir, `ep${epNum}`);
+    const epTsDir = path.join(epDir, 'ts');
+    const epBdOut = path.join(epDir, 'BDMV_OUT');
+
+    fs.mkdirSync(epTsDir, { recursive: true });
+    fs.mkdirSync(epBdOut, { recursive: true });
+
+    sendLog(`[MT] ── Episode ${epNum}: ${path.basename(ep.path)}`);
+    progress(i * 4, `Episode ${epNum}/${episodes.length}: encoding video`);
+
+    // Probe source for resolution + FPS
+    const srcFps    = parseFloat(getVideoFps(ep.path));
+    const srcRes    = detectResolution(ep.path);
+    const bdTarget  = selectHwResAndFps(srcFps, srcRes.h);
+    const safeW     = bdTarget.w, safeH = bdTarget.h;
+    const safeFps   = getBdFpsFraction(bdTarget.fps);
+    const level     = safeH <= 480 ? '3.1' : safeH <= 720 ? '4.0' : '4.1';
+    const gopSize   = Math.round(bdTarget.fps || 24);
+    const maxrateK  = safeH <= 720 ? '15000k' : '25000k';
+    const bufsizeK  = safeH <= 720 ? '20000k' : '30000k';
+    sendLog(`[MT] EP${epNum}: source ${srcRes.w}×${srcRes.h}@${srcFps.toFixed(3)} → BD ${safeW}×${safeH}@${safeFps}`);
+
+    const mainTs    = path.join(epTsDir, 'main.ts');
+    const mainBdMkv = path.join(epDir, 'main_bd.mkv');
+
+    // Warn about tracks that will be silently dropped by '-map 0:v:0 -map 0:a:0'
+    if (TOOLS.ffprobe) {
+      try {
+        const { execFileSync } = require('child_process');
+        const probeOut = execFileSync(
+          TOOLS.ffprobe,
+          ['-v', 'quiet', '-print_format', 'json', '-show_streams', ep.path],
+          { encoding: 'utf8', timeout: 15000 }
+        );
+        const streams   = JSON.parse(probeOut).streams || [];
+        const numAudio  = streams.filter(s => s.codec_type === 'audio').length;
+        const numSubs   = streams.filter(s => s.codec_type === 'subtitle').length;
+        if (numAudio > 1) {
+          sendLog(`[MT] EP${epNum}: WARNING — source has ${numAudio} audio tracks, 1 included`);
+        }
+        if (numSubs > 0) {
+          sendLog(`[MT] EP${epNum}: WARNING — source has ${numSubs} subtitle track${numSubs > 1 ? 's' : ''}, 0 included`);
+        }
+      } catch (_) {}
+    }
+
+    // Step A: FFmpeg → main.ts
+    const ffArgs = ['-y', '-i', ep.path,
+      '-map', '0:v:0', '-map', '0:a:0',
+      ...(fastEncode
+        ? ['-c:v', 'h264_videotoolbox', '-realtime', '0', '-profile:v', 'high',
+           '-level', level, '-pix_fmt', 'yuv420p',
+           '-g', String(gopSize), '-keyint_min', String(gopSize),
+           '-sc_threshold', '0', '-bf', '3', '-refs', '4',
+           '-b:v', safeH > 720 ? '15000k' : '8000k', '-maxrate', maxrateK, '-bufsize', bufsizeK]
+        : ['-c:v', 'libx264', '-preset', 'slow', '-profile:v', 'high',
+           '-level', level, '-pix_fmt', 'yuv420p',
+           '-crf', '20',
+           '-g', String(gopSize), '-keyint_min', String(gopSize),
+           '-sc_threshold', '0', '-bf', '3', '-refs', '4',
+           '-maxrate', maxrateK, '-bufsize', bufsizeK]),
+    ];
+    sendLog(`[MT] EP${epNum}: ${fastEncode ? 'h264_videotoolbox (experimental fast encode)' : 'libx264 Blu-ray-safe CRF20'} L${level}`);
+    const needsScale = srcRes.w !== safeW || srcRes.h !== safeH;
+    const vfParts = [];
+    if (needsScale) vfParts.push(`scale=${safeW}:${safeH}:force_original_aspect_ratio=decrease,pad=${safeW}:${safeH}:(ow-iw)/2:(oh-ih)/2`);
+    if (safeFps) vfParts.push(`fps=${safeFps}`);
+    if (vfParts.length) ffArgs.push('-vf', vfParts.join(','));
+    ffArgs.push('-c:a', 'ac3', '-b:a', '640k',
+      '-f', 'mpegts', '-mpegts_flags', 'system_b', mainTs);
+
+    const dur = getVideoDuration(ep.path);
+    if (dur > 0) sendLog(`__CRF_START:${Math.round(dur)}`);
+
+    const ffResult = await new Promise(resolve => {
+      const ff = spawn(TOOLS.ffmpeg, ffArgs);
+      let stderr = '';
+      ff.stderr.on('data', d => {
+        const l = d.toString(); stderr += l;
+        if (l.includes('time=') || l.includes('frame=') || l.includes('size=')) sendLog(l.trim());
+      });
+      ff.on('close', code => resolve(code === 0 ? null : `EP${epNum} FFmpeg failed (${code}):\n${stderr.slice(-500)}`));
+      ff.on('error', err => resolve(`EP${epNum} FFmpeg error: ${err.message}`));
+    });
+    if (ffResult) { cleanup(workDir); return { error: ffResult }; }
+    sendLog(`[MT] EP${epNum}: main.ts ${(fs.statSync(mainTs).size/1e6).toFixed(1)} MB`);
+
+    // Step B: mkvmerge → main_bd.mkv
+    progress(i * 4 + 1, `Episode ${epNum}/${episodes.length}: mkvmerge`);
+    const mkvResult = await new Promise(resolve => {
+      const mkv = spawn(TOOLS.mkvmerge, ['-o', mainBdMkv, mainTs]);
+      mkv.stdout.on('data', d => { const l = d.toString().trim(); if (l) sendLog(l); });
+      mkv.stderr.on('data', d => { const l = d.toString().trim(); if (l) sendLog(l); });
+      mkv.on('close', code => resolve((code === 0 || code === 1) && fs.existsSync(mainBdMkv) ? null : `EP${epNum} mkvmerge failed (${code})`));
+      mkv.on('error', err => resolve(`EP${epNum} mkvmerge error: ${err.message}`));
+    });
+    if (mkvResult) { cleanup(workDir); return { error: mkvResult }; }
+    sendLog(`[MT] EP${epNum}: main_bd.mkv ${(fs.statSync(mainBdMkv).size/1e6).toFixed(1)} MB`);
+
+    // Step C: write tsMuxeR meta
+    const metaFile  = path.join(epDir, 'tsmuxer.meta');
+    const metaLines = [
+      'MUXOPT --blu-ray --new-audio-pes',
+      `V_MPEG4/ISO/AVC, "${tsPath(mainBdMkv)}", fps=${safeFps}, insertSEI, contSPS, track=1`,
+      `A_AC3, "${tsPath(mainBdMkv)}", lang=und, track=2, default`,
+    ];
+    fs.writeFileSync(metaFile, metaLines.join('\n') + '\n');
+    sendLog(`[MT] EP${epNum} meta:\n${metaLines.map(l => '  ' + l).join('\n')}`);
+
+    // Step D: run tsMuxeR
+    progress(i * 4 + 2, `Episode ${epNum}/${episodes.length}: tsMuxeR`);
+    const tsResult = await new Promise(resolve => {
+      sendLog(`[MT] EP${epNum} tsMuxeR: "${metaFile}" → "${epBdOut}"`);
+      const ts = spawn(TOOLS.tsmuxer, [metaFile, epBdOut]);
+      ts.stdout.on('data', d => { const l = d.toString().trim(); if (l) sendLog(l); });
+      ts.stderr.on('data', d => { const l = d.toString().trim(); if (l) sendLog(l); });
+      ts.on('close', code => {
+        if (code !== 0) return resolve(`EP${epNum} tsMuxeR failed (exit ${code})`);
+        const streamDir = path.join(epBdOut, 'BDMV', 'STREAM');
+        const files = fs.existsSync(streamDir) ? fs.readdirSync(streamDir) : [];
+        sendLog(`[MT] EP${epNum} STREAM/: ${files.join(', ')}`);
+        const playDir = path.join(epBdOut, 'BDMV', 'PLAYLIST');
+        const plFiles = fs.existsSync(playDir) ? fs.readdirSync(playDir) : [];
+        sendLog(`[MT] EP${epNum} PLAYLIST/: ${plFiles.join(', ')}`);
+        const clipDir = path.join(epBdOut, 'BDMV', 'CLIPINF');
+        const clFiles = fs.existsSync(clipDir) ? fs.readdirSync(clipDir) : [];
+        sendLog(`[MT] EP${epNum} CLIPINF/: ${clFiles.join(', ')}`);
+        if (!files.some(f => f.endsWith('.m2ts'))) return resolve(`EP${epNum} tsMuxeR produced no .m2ts output`);
+        resolve(null);
+      });
+      ts.on('error', err => resolve(`EP${epNum} tsMuxeR error: ${err.message}`));
+    });
+    if (tsResult) { cleanup(workDir); return { error: tsResult }; }
+
+    // Log MovieObject.bdmv hex for ep1 — helps debug nav command format
+    if (epNum === 1) {
+      const mobjPath = path.join(epBdOut, 'BDMV', 'MovieObject.bdmv');
+      if (fs.existsSync(mobjPath)) {
+        const buf = fs.readFileSync(mobjPath);
+        sendLog(`[MT] EP1 MovieObject.bdmv ${buf.length} bytes, first 128 hex: ${buf.slice(0, 128).toString('hex')}`);
+      }
+      const idxPath = path.join(epBdOut, 'BDMV', 'index.bdmv');
+      if (fs.existsSync(idxPath)) {
+        const buf = fs.readFileSync(idxPath);
+        sendLog(`[MT] EP1 index.bdmv ${buf.length} bytes, first 64 hex: ${buf.slice(0, 64).toString('hex')}`);
+      }
+    }
+
+    epBdFolders.push(epBdOut);
+    sendLog(`[MT] EP${epNum}: pipeline complete`);
+  }
+
+  // ── Step 2: Merge all episodes into one BDMV structure ──────────────────────
+  progress(episodes.length * 4, `Merging ${episodes.length} episodes into BDMV`);
+  sendLog('[MT] Merging BDMV structures…');
+
+  const mergeDirs = ['BDMV/STREAM', 'BDMV/CLIPINF', 'BDMV/PLAYLIST', 'BDMV/BACKUP', 'CERTIFICATE'];
+  mergeDirs.forEach(d => fs.mkdirSync(path.join(bdFolder, d), { recursive: true }));
+
+  // Find which file prefix tsMuxeR used for this episode's output
+  const findTsMuxerPrefix = epBd => {
+    for (const n of ['00001', '00000']) {
+      if (fs.existsSync(path.join(epBd, 'BDMV', 'STREAM', `${n}.m2ts`))) return n;
+    }
+    return null;
+  };
+
+  let ep1TsMuxerPrefix = null;
+
+  for (let i = 0; i < episodes.length; i++) {
+    const epNum  = i + 1;
+    const epBd   = epBdFolders[i];
+    const prefix = findTsMuxerPrefix(epBd);
+    if (!prefix) { cleanup(workDir); return { error: `Episode ${epNum}: tsMuxeR produced no STREAM file` }; }
+    if (epNum === 1) ep1TsMuxerPrefix = prefix;
+
+    const dest = pad(epNum);  // '00001', '00002', …
+
+    // STREAM
+    const srcStream = path.join(epBd, 'BDMV', 'STREAM', `${prefix}.m2ts`);
+    const dstStream = path.join(bdFolder, 'BDMV', 'STREAM', `${dest}.m2ts`);
+    fs.copyFileSync(srcStream, dstStream);
+    sendLog(`[MT] EP${epNum}: STREAM/${dest}.m2ts (${(fs.statSync(dstStream).size/1e6).toFixed(1)} MB)`);
+
+    // CLIPINF — internal data is binary codec parameters, not ASCII clip refs; copy as-is
+    const srcClpi = path.join(epBd, 'BDMV', 'CLIPINF', `${prefix}.clpi`);
+    if (!fs.existsSync(srcClpi)) { cleanup(workDir); return { error: `Episode ${epNum}: no CLPI file found` }; }
+    const dstClpi = path.join(bdFolder, 'BDMV', 'CLIPINF', `${dest}.clpi`);
+    fs.copyFileSync(srcClpi, dstClpi);
+    fs.copyFileSync(srcClpi, path.join(bdFolder, 'BDMV', 'BACKUP', `${dest}.clpi`));
+
+    // PLAYLIST — patch clip reference from prefix to dest, then copy
+    const srcMpls = path.join(epBd, 'BDMV', 'PLAYLIST', `${prefix}.mpls`);
+    if (!fs.existsSync(srcMpls)) { cleanup(workDir); return { error: `Episode ${epNum}: no MPLS file found` }; }
+    const dstMpls = path.join(bdFolder, 'BDMV', 'PLAYLIST', `${dest}.mpls`);
+    if (prefix === dest) {
+      fs.copyFileSync(srcMpls, dstMpls);
+    } else {
+      let buf   = fs.readFileSync(srcMpls);
+      const from = Buffer.from(prefix + 'M2TS', 'ascii');
+      const to   = Buffer.from(dest   + 'M2TS', 'ascii');
+      let j = 0;
+      while ((j = buf.indexOf(from, j)) !== -1) { to.copy(buf, j); j += from.length; }
+      fs.writeFileSync(dstMpls, buf);
+      sendLog(`[MT] EP${epNum}: patched MPLS clip ref ${prefix}→${dest}`);
+    }
+    fs.copyFileSync(dstMpls, path.join(bdFolder, 'BDMV', 'BACKUP', `${dest}.mpls`));
+  }
+
+  // Copy nav files from episode 1's tsMuxeR output (valid single-title BDMV base)
+  const ep1Bd = epBdFolders[0];
+  for (const navFile of ['index.bdmv', 'MovieObject.bdmv']) {
+    const src = path.join(ep1Bd, 'BDMV', navFile);
+    if (fs.existsSync(src)) {
+      fs.copyFileSync(src, path.join(bdFolder, 'BDMV', navFile));
+      try { fs.copyFileSync(src, path.join(bdFolder, 'BDMV', 'BACKUP', navFile)); } catch(_) {}
+    }
+  }
+  sendLog('[MT] Copied nav files from EP1 tsMuxeR output');
+
+  // ── Step 3: Fix navigation for N titles ────────────────────────────────────
+  progress(episodes.length * 4 + 1, 'Patching navigation');
+  fixMultiTitleNavigationForEpisodes(bdFolder, episodes.length, ep1TsMuxerPrefix);
+
+  // ── Step 4: Validate structure ─────────────────────────────────────────────
+  progress(episodes.length * 4 + 2, 'Validating disc structure');
+  sendLog('[MT] Validation:');
+  const errors = [];
+  const chk = (label, ok) => { sendLog(`  ${ok?'✓':'✗'} ${label}`); if (!ok) errors.push(label); };
+
+  chk('BDMV folder exists',           fs.existsSync(path.join(bdFolder, 'BDMV')));
+  chk('CERTIFICATE folder exists',    fs.existsSync(path.join(bdFolder, 'CERTIFICATE')));
+  chk('index.bdmv exists',            fs.existsSync(path.join(bdFolder, 'BDMV', 'index.bdmv')));
+  chk('MovieObject.bdmv exists',      fs.existsSync(path.join(bdFolder, 'BDMV', 'MovieObject.bdmv')));
+  chk('ISO method available',         bestIsoMethod !== null);
+
+  const finalStreamDir  = path.join(bdFolder, 'BDMV', 'STREAM');
+  const finalPlaylistDir = path.join(bdFolder, 'BDMV', 'PLAYLIST');
+  const finalClipinfDir  = path.join(bdFolder, 'BDMV', 'CLIPINF');
+
+  const m2tsFiles  = fs.existsSync(finalStreamDir)   ? fs.readdirSync(finalStreamDir).filter(f => f.endsWith('.m2ts'))  : [];
+  const mplsFiles  = fs.existsSync(finalPlaylistDir) ? fs.readdirSync(finalPlaylistDir).filter(f => f.endsWith('.mpls')) : [];
+  const clpiFiles  = fs.existsSync(finalClipinfDir)  ? fs.readdirSync(finalClipinfDir).filter(f => f.endsWith('.clpi'))  : [];
+
+  sendLog(`[MT] STREAM/:   ${m2tsFiles.join(', ')}`);
+  sendLog(`[MT] PLAYLIST/: ${mplsFiles.join(', ')}`);
+  sendLog(`[MT] CLIPINF/:  ${clpiFiles.join(', ')}`);
+
+  chk(`STREAM has ${episodes.length} .m2ts files (found ${m2tsFiles.length})`,   m2tsFiles.length === episodes.length);
+  chk(`PLAYLIST has ${episodes.length} .mpls files (found ${mplsFiles.length})`, mplsFiles.length === episodes.length);
+  chk(`CLIPINF has ${episodes.length} .clpi files (found ${clpiFiles.length})`,  clpiFiles.length === episodes.length);
+
+  // Verify each mpls references the correct clip
+  for (let i = 0; i < episodes.length; i++) {
+    const clipId = pad(i + 1);
+    const mplsPath = path.join(finalPlaylistDir, `${clipId}.mpls`);
+    if (fs.existsSync(mplsPath)) {
+      const buf = fs.readFileSync(mplsPath);
+      const hasRef = buf.indexOf(Buffer.from(clipId, 'ascii')) !== -1;
+      chk(`PLAYLIST/${clipId}.mpls references clip ${clipId}`, hasRef);
+    }
+  }
+
+  if (errors.length > 0) {
+    cleanup(workDir);
+    return { error: `Disc validation failed:\n\n${errors.map(e => '  • ' + e).join('\n')}` };
+  }
+  sendLog('[MT] All validation checks passed');
+
+  // ── Step 5: Create ISO ──────────────────────────────────────────────────────
+  progress(episodes.length * 4 + 3, 'Packaging ISO');
+  try {
+    await packageISO(bdFolder, outDir, name);
+  } catch(e) {
+    cleanup(workDir);
+    return { error: `ISO creation failed:\n${e.message}` };
+  }
+
+  cleanup(workDir);
+  sendLog('[MT] ─────────────────────────────────────────');
+  sendLog('[MT] Multi-title disc complete.');
+  sendLog(`[MT] ISO: ${isoPath}`);
+  sendLog(`[MT] ${episodes.length} episodes as separate selectable titles.`);
+  sendLog(`[MT] Encode mode: ${fastEncode ? 'h264_videotoolbox (experimental fast encode)' : 'libx264 CRF20 (Blu-ray safe)'}`);
+  sendLog('[MT] Each episode is accessible via the Title Selection button on your player.');
+  sendLog('[MT] ─────────────────────────────────────────');
+
+  const isoSize = fs.existsSync(isoPath) ? fs.statSync(isoPath).size : 0;
+  mainWindow.webContents.send('build-progress', { done: true, isoPath, isoSize });
+  return { success: true, isoPath };
+});
