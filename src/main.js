@@ -2990,7 +2990,7 @@ function timeToMs(t) {
 // Then we add objects 3..N+1 for episodes 2..N, each PlayPL(i).
 // index.bdmv gets N-1 additional title entries pointing to these new objects.
 
-function fixMultiTitleNavigationForEpisodes(bdFolder, numEpisodes, ep1TsMuxerPrefix) {
+function fixMultiTitleNavigationForEpisodes(bdFolder, numEpisodes, ep1TsMuxerPrefix, ep1BdTarget) {
   if (numEpisodes <= 1) return;
 
   const mobjPath  = path.join(bdFolder, 'BDMV', 'MovieObject.bdmv');
@@ -3009,8 +3009,9 @@ function fixMultiTitleNavigationForEpisodes(bdFolder, numEpisodes, ep1TsMuxerPre
   // now points at nothing. Patch obj[2] to PlayPL(1) = EP1, then append N-1 new
   // objects for EP2..EPN (PlayPL(2)..PlayPL(N)). tsMuxeR's existing Title 1 →
   // obj[2] covers EP1; we only add entries for EP2..EPN.
+  const dumpHex = (buf) => buf.toString('hex').match(/.{1,32}/g).join('\n');
   const mobjBuf = Buffer.from(fs.readFileSync(mobjPath));
-  sendLog(`[MT] fixNav: MovieObject.bdmv before — ${mobjBuf.length} bytes, first 128 hex: ${mobjBuf.slice(0, 128).toString('hex')}`);
+  sendLog(`[MT] fixNav: MovieObject.bdmv before — ${mobjBuf.length} bytes:\n${dumpHex(mobjBuf)}`);
 
   const MOBJ_STRUCT_OFF = 40;
   const NUM_OBJS_OFF    = 48;
@@ -3047,6 +3048,7 @@ function fixMultiTitleNavigationForEpisodes(bdFolder, numEpisodes, ep1TsMuxerPre
   // Patch obj[2]: PlayPL(0) → PlayPL(1) because EP1's playlist was renamed during merge
   mobjBuf.writeUInt32BE(1, obj2Pos + lastCmdOff + 4);
   sendLog('[MT] fixNav: patched obj[2] PlayPL(0) → PlayPL(1) (EP1 mpls renamed during merge)');
+  sendLog(`[MT] fixNav: obj[2] post-patch bytes ${obj2Pos}–${obj2Pos + templateObjBytes.length - 1}: ${mobjBuf.slice(obj2Pos, obj2Pos + templateObjBytes.length).toString('hex')}`);
 
   // Append N-1 new objects for EP2..EPN: PlayPL(2), PlayPL(3), ..., PlayPL(N)
   const newObjBufs = [];
@@ -3065,12 +3067,31 @@ function fixMultiTitleNavigationForEpisodes(bdFolder, numEpisodes, ep1TsMuxerPre
 
   fs.writeFileSync(mobjPath, newMobjBuf);
   sendLog(`[MT] fixNav: MovieObject.bdmv ${numObjs}→${numObjs + (N - 1)} objects, ${mobjBuf.length}→${newMobjBuf.length} bytes`);
-  sendLog(`[MT] fixNav: MovieObject.bdmv after — ${newMobjBuf.length} bytes, first 128 hex: ${newMobjBuf.slice(0, 128).toString('hex')}`);
+  sendLog(`[MT] fixNav: MovieObject.bdmv after — ${newMobjBuf.length} bytes:\n${dumpHex(newMobjBuf)}`);
 
   // ── 2. index.bdmv: read tsMuxeR file, append N-1 title entries ─────────────
   // tsMuxeR's existing Title 1 → obj[2] covers EP1. Add entries for EP2..EPN only.
   const idxBuf       = Buffer.from(fs.readFileSync(indexPath));
-  sendLog(`[MT] fixNav: index.bdmv before — ${idxBuf.length} bytes, first 128 hex: ${idxBuf.slice(0, 128).toString('hex')}`);
+  sendLog(`[MT] fixNav: index.bdmv before — ${idxBuf.length} bytes:\n${dumpHex(idxBuf)}`);
+
+  // Patch AppInfoBD video_format and frame_rate (tsMuxeR leaves these zeroed)
+  if (ep1BdTarget) {
+    const videoFormatMap = { 480: 3, 576: 7, 720: 5, 1080: 6 };
+    const frameRateMap = (fps) => {
+      if (Math.abs(fps - 23.976) < 0.05) return 1;
+      if (Math.abs(fps - 24) < 0.05)     return 2;
+      if (Math.abs(fps - 25) < 0.05)     return 3;
+      if (Math.abs(fps - 29.97) < 0.05)  return 4;
+      if (Math.abs(fps - 50) < 0.05)     return 6;
+      if (Math.abs(fps - 59.94) < 0.05)  return 7;
+      return 1;  // safe default
+    };
+    const vf = videoFormatMap[ep1BdTarget.h] || 6;
+    const fr = frameRateMap(ep1BdTarget.fps);
+    const APPINFO_BYTE_46 = 46;
+    idxBuf[APPINFO_BYTE_46] = (vf << 4) | (fr & 0x0f);
+    sendLog(`[MT] fixNav: AppInfoBD patched — video_format=${vf} (${ep1BdTarget.h}p), frame_rate=${fr} (${ep1BdTarget.fps}), byte 46 = 0x${idxBuf[APPINFO_BYTE_46].toString(16).padStart(2, '0')}`);
+  }
 
   const idxStart     = idxBuf.readUInt32BE(8);   // IndexesStartAddress
   const idxLen       = idxBuf.readUInt32BE(idxStart);
@@ -3080,25 +3101,31 @@ function fixMultiTitleNavigationForEpisodes(bdFolder, numEpisodes, ep1TsMuxerPre
   const TITLES_OFF     = idxDataStart + 10;
 
   const curNumTitles = idxBuf.readUInt16BE(NUM_TITLES_OFF);
-  const newNumTitles = curNumTitles + (N - 1);
+  const newNumTitles = curNumTitles + N;
 
-  const newEntries = Buffer.alloc((N - 1) * 4);
-  for (let i = 0; i < N - 1; i++) {
-    const movieObjIdx = numObjs + i;
+  const newEntries = Buffer.alloc(N * 4);
+  // Entry 0: Title 1 → obj[2] (EP1, patched to PlayPL(1))
+  newEntries[0] = 0x40;
+  newEntries[1] = 0x00;
+  newEntries.writeUInt16BE(2, 2);
+  sendLog(`[MT] fixNav: index Title[${curNumTitles}] → MovieObject[2] (PlayPL(1) EP1)`);
+  // Entries 1..N-1: Title 2..N → new objects for EP2..EPN
+  for (let i = 1; i < N; i++) {
+    const movieObjIdx = numObjs + (i - 1);
     newEntries[i * 4 + 0] = 0x40;
     newEntries[i * 4 + 1] = 0x00;
     newEntries.writeUInt16BE(movieObjIdx, i * 4 + 2);
-    sendLog(`[MT] fixNav: index Title[${curNumTitles + i}] → MovieObject[${movieObjIdx}] (PlayPL(${i + 2}))`);
+    sendLog(`[MT] fixNav: index Title[${curNumTitles + i}] → MovieObject[${movieObjIdx}] (PlayPL(${i + 1}))`);
   }
 
   const remainingSlots = Math.floor((idxLen - 10 - curNumTitles * 4) / 4);
   let newIdxBuf;
-  if (N - 1 <= remainingSlots) {
+  if (N <= remainingSlots) {
     newIdxBuf = Buffer.from(idxBuf);
     newIdxBuf.writeUInt16BE(newNumTitles, NUM_TITLES_OFF);
     newEntries.copy(newIdxBuf, TITLES_OFF + curNumTitles * 4);
   } else {
-    const extraBytes = ((N - 1) - remainingSlots) * 4;
+    const extraBytes = (N - remainingSlots) * 4;
     newIdxBuf = Buffer.concat([idxBuf, Buffer.alloc(extraBytes)]);
     newIdxBuf.writeUInt32BE(idxLen + extraBytes, idxStart);
     newIdxBuf.writeUInt16BE(newNumTitles, NUM_TITLES_OFF);
@@ -3108,7 +3135,7 @@ function fixMultiTitleNavigationForEpisodes(bdFolder, numEpisodes, ep1TsMuxerPre
 
   fs.writeFileSync(indexPath, newIdxBuf);
   sendLog(`[MT] fixNav: index.bdmv NumberOfTitles ${curNumTitles}→${newNumTitles}, ${idxBuf.length}→${newIdxBuf.length} bytes`);
-  sendLog(`[MT] fixNav: index.bdmv after — ${newIdxBuf.length} bytes, first 128 hex: ${newIdxBuf.slice(0, 128).toString('hex')}`);
+  sendLog(`[MT] fixNav: index.bdmv after — ${newIdxBuf.length} bytes:\n${dumpHex(newIdxBuf)}`);
 
   // ── 3. BACKUP copies ────────────────────────────────────────────────────────
   if (fs.existsSync(backDir)) {
@@ -3215,6 +3242,7 @@ ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discNa
   const epBdFolders = [];
 
   // ── Per-episode pipeline ────────────────────────────────────────────────────
+  let ep1BdTarget = null;
   for (let i = 0; i < episodes.length; i++) {
     const ep    = episodes[i];
     const epNum = i + 1;
@@ -3232,6 +3260,7 @@ ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discNa
     const srcFps    = parseFloat(getVideoFps(ep.path));
     const srcRes    = detectResolution(ep.path);
     const bdTarget  = selectHwResAndFps(srcFps, srcRes.h);
+    if (i === 0) ep1BdTarget = bdTarget;
     const safeW     = bdTarget.w, safeH = bdTarget.h;
     const safeFps   = getBdFpsFraction(bdTarget.fps);
     const level     = safeH <= 480 ? '3.1' : safeH <= 720 ? '4.0' : '4.1';
@@ -3440,7 +3469,7 @@ ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discNa
 
   // ── Step 3: Fix navigation for N titles ────────────────────────────────────
   progress(episodes.length * 4 + 1, 'Patching navigation');
-  fixMultiTitleNavigationForEpisodes(bdFolder, episodes.length, ep1TsMuxerPrefix);
+  fixMultiTitleNavigationForEpisodes(bdFolder, episodes.length, ep1TsMuxerPrefix, ep1BdTarget);
 
   // ── Step 4: Validate structure ─────────────────────────────────────────────
   progress(episodes.length * 4 + 2, 'Validating disc structure');
