@@ -3208,8 +3208,16 @@ function fixMultiTitleNavigationForEpisodes(bdFolder, numEpisodes, ep1TsMuxerPre
   }
 
   sendLog(`[MT] trace: newIdxBuf[46] pre-write = 0x${newIdxBuf[46].toString(16).padStart(2,'0')}`);
+
+  // Redirect FirstPlay from obj[0] → obj[2] to bypass tsMuxeR's obj[0] which hangs LG players
+  const firstPlayMobjRefOff = idxDataStart + 2;  // idxStart+4 (FirstPlay entry) +2 (mobj_id_ref)
+  newIdxBuf.writeUInt16BE(2, firstPlayMobjRefOff);
+  sendLog(`[MT] fixNav: index FirstPlay obj[0] → obj[2] (bypass tsMuxeR obj[0], play EP1 directly)`);
+
   fs.writeFileSync(indexPath, newIdxBuf);
   verifyWrite('index.bdmv', newIdxBuf, indexPath);
+  const fpBytes = newIdxBuf.slice(idxDataStart, idxDataStart + 4);
+  sendLog(`[MT] fixNav: index FirstPlay bytes [${idxDataStart}..${idxDataStart+3}] = ${fpBytes.toString('hex')} (flags=0x${fpBytes.readUInt16BE(0).toString(16).padStart(4,'0')} mobj_id_ref=0x${fpBytes.readUInt16BE(2).toString(16).padStart(4,'0')})`);
   sendLog(`[MT] fixNav: index.bdmv NumberOfTitles ${curNumTitles}→${newNumTitles}, ${idxBuf.length}→${newIdxBuf.length} bytes`);
   sendLog(`[MT] fixNav: index.bdmv after — ${newIdxBuf.length} bytes:\n${dumpHex(newIdxBuf)}`);
 
