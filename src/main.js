@@ -157,6 +157,8 @@ async function probeIsoMethod() {
   }
 }
 
+const dumpHex = (buf) => buf.toString('hex').match(/.{1,32}/g).join('\n');
+
 // ── Window ────────────────────────────────────────────────────────────────────
 
 function createWindow() {
@@ -192,6 +194,19 @@ function createWindow() {
 app.whenReady().then(async () => {
   createWindow();
   probeIsoMethod(); // non-blocking — result stored in bestIsoMethod
+  // Sanity-check dumpHex with a known buffer
+  const testBuf = Buffer.from([
+    0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+    0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+    0x31, 0x46, 0x21, 0x81,
+  ]);
+  const expected = '00112233445566778899aabbccddeeff\n31462181';
+  const actual = dumpHex(testBuf);
+  if (actual === expected) {
+    sendLog('[startup] dumpHex sanity: PASS');
+  } else {
+    sendLog(`[startup] dumpHex sanity: FAIL — expected:\n${expected}\ngot:\n${actual}`);
+  }
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -3003,13 +3018,44 @@ function fixMultiTitleNavigationForEpisodes(bdFolder, numEpisodes, ep1TsMuxerPre
     return;
   }
 
+  const verifyWrite = (label, expectedBuf, filePath) => {
+    const actual = fs.readFileSync(filePath);
+    if (actual.length !== expectedBuf.length) {
+      sendLog(`[MT] fixNav: VERIFY FAIL ${label} — size mismatch: expected ${expectedBuf.length}, got ${actual.length}`);
+      return false;
+    }
+    const mismatches = [];
+    for (let i = 0; i < expectedBuf.length; i++) {
+      if (actual[i] !== expectedBuf[i]) {
+        mismatches.push(`  byte ${i}: expected 0x${expectedBuf[i].toString(16).padStart(2,'0')}, got 0x${actual[i].toString(16).padStart(2,'0')}`);
+        if (mismatches.length > 20) break;
+      }
+    }
+    if (mismatches.length === 0) {
+      sendLog(`[MT] fixNav: VERIFY OK ${label} — ${expectedBuf.length} bytes match disk`);
+      return true;
+    }
+    sendLog(`[MT] fixNav: VERIFY FAIL ${label} — ${mismatches.length} byte mismatches:\n${mismatches.join('\n')}`);
+    return false;
+  };
+
+  const videoFormatMap = { 480: 3, 576: 7, 720: 5, 1080: 6 };
+  const frameRateMap = (fps) => {
+    if (Math.abs(fps - 23.976) < 0.05) return 1;
+    if (Math.abs(fps - 24) < 0.05)     return 2;
+    if (Math.abs(fps - 25) < 0.05)     return 3;
+    if (Math.abs(fps - 29.97) < 0.05)  return 4;
+    if (Math.abs(fps - 50) < 0.05)     return 6;
+    if (Math.abs(fps - 59.94) < 0.05)  return 7;
+    return 1;
+  };
+
   // ── 1. MovieObject.bdmv: patch obj[2] to PlayPL(1), append N-1 new objects ──
   // tsMuxeR generates obj[0] first-play, obj[1] chapter handler, obj[2] PlayPL(0).
   // The merge step renames EP1's playlist 00000.mpls → 00001.mpls, so PlayPL(0)
   // now points at nothing. Patch obj[2] to PlayPL(1) = EP1, then append N-1 new
   // objects for EP2..EPN (PlayPL(2)..PlayPL(N)). tsMuxeR's existing Title 1 →
   // obj[2] covers EP1; we only add entries for EP2..EPN.
-  const dumpHex = (buf) => buf.toString('hex').match(/.{1,32}/g).join('\n');
   const mobjBuf = Buffer.from(fs.readFileSync(mobjPath));
   sendLog(`[MT] fixNav: MovieObject.bdmv before — ${mobjBuf.length} bytes:\n${dumpHex(mobjBuf)}`);
 
@@ -3066,30 +3112,23 @@ function fixMultiTitleNavigationForEpisodes(bdFolder, numEpisodes, ep1TsMuxerPre
   newMobjBuf.writeUInt16BE(numObjs + (N - 1), NUM_OBJS_OFF);
 
   fs.writeFileSync(mobjPath, newMobjBuf);
+  verifyWrite('MovieObject.bdmv', newMobjBuf, mobjPath);
   sendLog(`[MT] fixNav: MovieObject.bdmv ${numObjs}→${numObjs + (N - 1)} objects, ${mobjBuf.length}→${newMobjBuf.length} bytes`);
   sendLog(`[MT] fixNav: MovieObject.bdmv after — ${newMobjBuf.length} bytes:\n${dumpHex(newMobjBuf)}`);
 
   // ── 2. index.bdmv: read tsMuxeR file, append N-1 title entries ─────────────
   // tsMuxeR's existing Title 1 → obj[2] covers EP1. Add entries for EP2..EPN only.
   const idxBuf       = Buffer.from(fs.readFileSync(indexPath));
+  sendLog(`[MT] trace: idxBuf[46] post-read = 0x${idxBuf[46].toString(16).padStart(2,'0')}`);
   sendLog(`[MT] fixNav: index.bdmv before — ${idxBuf.length} bytes:\n${dumpHex(idxBuf)}`);
 
   // Patch AppInfoBD video_format and frame_rate (tsMuxeR leaves these zeroed)
   if (ep1BdTarget) {
-    const videoFormatMap = { 480: 3, 576: 7, 720: 5, 1080: 6 };
-    const frameRateMap = (fps) => {
-      if (Math.abs(fps - 23.976) < 0.05) return 1;
-      if (Math.abs(fps - 24) < 0.05)     return 2;
-      if (Math.abs(fps - 25) < 0.05)     return 3;
-      if (Math.abs(fps - 29.97) < 0.05)  return 4;
-      if (Math.abs(fps - 50) < 0.05)     return 6;
-      if (Math.abs(fps - 59.94) < 0.05)  return 7;
-      return 1;  // safe default
-    };
     const vf = videoFormatMap[ep1BdTarget.h] || 6;
     const fr = frameRateMap(ep1BdTarget.fps);
     const APPINFO_BYTE_46 = 46;
     idxBuf[APPINFO_BYTE_46] = (vf << 4) | (fr & 0x0f);
+    sendLog(`[MT] trace: idxBuf[46] post-AppInfoBD-patch = 0x${idxBuf[46].toString(16).padStart(2,'0')}`);
     sendLog(`[MT] fixNav: AppInfoBD patched — video_format=${vf} (${ep1BdTarget.h}p), frame_rate=${fr} (${ep1BdTarget.fps}), byte 46 = 0x${idxBuf[APPINFO_BYTE_46].toString(16).padStart(2, '0')}`);
   }
 
@@ -3119,21 +3158,30 @@ function fixMultiTitleNavigationForEpisodes(bdFolder, numEpisodes, ep1TsMuxerPre
   }
 
   const remainingSlots = Math.floor((idxLen - 10 - curNumTitles * 4) / 4);
+  sendLog(`[MT] trace: idxLen=${idxLen} (0x${idxLen.toString(16)}), curNumTitles=${curNumTitles}, N=${N}, remainingSlots=${remainingSlots}, branch=${N <= remainingSlots ? 'slot-fits' : 'extend'}`);
   let newIdxBuf;
   if (N <= remainingSlots) {
     newIdxBuf = Buffer.from(idxBuf);
+    sendLog(`[MT] trace: newIdxBuf[46] post-clone (slot-fits branch) = 0x${newIdxBuf[46].toString(16).padStart(2,'0')}, idxBuf[46] = 0x${idxBuf[46].toString(16).padStart(2,'0')}`);
     newIdxBuf.writeUInt16BE(newNumTitles, NUM_TITLES_OFF);
+    sendLog(`[MT] trace: newIdxBuf[46] post-numTitles-write = 0x${newIdxBuf[46].toString(16).padStart(2,'0')}`);
     newEntries.copy(newIdxBuf, TITLES_OFF + curNumTitles * 4);
+    sendLog(`[MT] trace: newIdxBuf[46] post-entries-copy = 0x${newIdxBuf[46].toString(16).padStart(2,'0')}`);
   } else {
     const extraBytes = (N - remainingSlots) * 4;
     newIdxBuf = Buffer.concat([idxBuf, Buffer.alloc(extraBytes)]);
+    sendLog(`[MT] trace: newIdxBuf[46] post-concat (extend branch) = 0x${newIdxBuf[46].toString(16).padStart(2,'0')}, idxBuf[46] = 0x${idxBuf[46].toString(16).padStart(2,'0')}`);
     newIdxBuf.writeUInt32BE(idxLen + extraBytes, idxStart);
     newIdxBuf.writeUInt16BE(newNumTitles, NUM_TITLES_OFF);
+    sendLog(`[MT] trace: newIdxBuf[46] post-numTitles-write = 0x${newIdxBuf[46].toString(16).padStart(2,'0')}`);
     newEntries.copy(newIdxBuf, TITLES_OFF + curNumTitles * 4);
+    sendLog(`[MT] trace: newIdxBuf[46] post-entries-copy = 0x${newIdxBuf[46].toString(16).padStart(2,'0')}`);
     sendLog(`[MT] fixNav: extended index.bdmv by ${extraBytes} bytes`);
   }
 
+  sendLog(`[MT] trace: newIdxBuf[46] pre-write = 0x${newIdxBuf[46].toString(16).padStart(2,'0')}`);
   fs.writeFileSync(indexPath, newIdxBuf);
+  verifyWrite('index.bdmv', newIdxBuf, indexPath);
   sendLog(`[MT] fixNav: index.bdmv NumberOfTitles ${curNumTitles}→${newNumTitles}, ${idxBuf.length}→${newIdxBuf.length} bytes`);
   sendLog(`[MT] fixNav: index.bdmv after — ${newIdxBuf.length} bytes:\n${dumpHex(newIdxBuf)}`);
 
@@ -3142,9 +3190,39 @@ function fixMultiTitleNavigationForEpisodes(bdFolder, numEpisodes, ep1TsMuxerPre
     try {
       fs.copyFileSync(mobjPath,  path.join(backDir, 'MovieObject.bdmv'));
       fs.copyFileSync(indexPath, path.join(backDir, 'index.bdmv'));
+      verifyWrite('BACKUP/MovieObject.bdmv', newMobjBuf, path.join(backDir, 'MovieObject.bdmv'));
+      verifyWrite('BACKUP/index.bdmv', newIdxBuf, path.join(backDir, 'index.bdmv'));
       sendLog('[MT] fixNav: BACKUP copies updated');
     } catch (_) {}
   }
+
+  // Post-write structural validation — abort the build if disc structure is wrong
+  const onDisk = fs.readFileSync(indexPath);
+  const errors = [];
+
+  if (onDisk.slice(0, 4).toString('ascii') !== 'INDX') errors.push('INDX magic missing');
+  if (onDisk.slice(4, 8).toString('ascii') !== '0200') errors.push('version != 0200');
+  if (onDisk.readUInt32BE(12) !== 0) errors.push(`ExtensionDataStartAddress = ${onDisk.readUInt32BE(12)}, expected 0`);
+
+  if (ep1BdTarget) {
+    const expectedVfFr = ((videoFormatMap[ep1BdTarget.h] || 6) << 4) | (frameRateMap(ep1BdTarget.fps) & 0x0f);
+    if (onDisk[46] !== expectedVfFr) {
+      errors.push(`AppInfoBD byte 46 on disk = 0x${onDisk[46].toString(16).padStart(2,'0')}, expected 0x${expectedVfFr.toString(16).padStart(2,'0')}`);
+    }
+  }
+
+  const onDiskIdxStart = onDisk.readUInt32BE(8);
+  const NUM_TITLES_ON_DISK = onDisk.readUInt16BE(onDiskIdxStart + 4 + 8);
+  if (NUM_TITLES_ON_DISK !== N) {
+    errors.push(`NumberOfTitles on disk = ${NUM_TITLES_ON_DISK}, expected ${N}`);
+  }
+
+  if (errors.length > 0) {
+    const errMsg = `index.bdmv post-write validation failed:\n${errors.map(e => '  • ' + e).join('\n')}`;
+    sendLog(`[MT] fixNav: VALIDATION FAIL — ${errMsg}`);
+    throw new Error(errMsg);
+  }
+  sendLog(`[MT] fixNav: post-write validation passed`);
 }
 
 // ── IPC: build multi-title disc ───────────────────────────────────────────────
@@ -3167,6 +3245,7 @@ ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discNa
   const homeDir  = os.homedir();
   const outDir   = (outputDir && outputDir.length > 1) ? outputDir : path.join(homeDir, 'Desktop');
   const name     = sanitize(discName || 'Episodes');
+  let project_navRefDir = null;
   const tempBase = fs.existsSync(outDir) ? outDir : os.tmpdir();
   const workDir  = path.join(tempBase, `discforge_mt_${Date.now()}`);
   const bdFolder = path.join(workDir, 'BDMV_ROOT');
@@ -3469,7 +3548,31 @@ ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discNa
 
   // ── Step 3: Fix navigation for N titles ────────────────────────────────────
   progress(episodes.length * 4 + 1, 'Patching navigation');
+
+  // Stash pre-patch tsMuxeR nav files for offline diff
+  try {
+    const refDir = path.join(outDir, '_navref_' + Date.now());
+    fs.mkdirSync(refDir, { recursive: true });
+    fs.copyFileSync(path.join(epBdFolders[0], 'BDMV', 'index.bdmv'), path.join(refDir, 'tsmuxer_ep1_index.bdmv'));
+    fs.copyFileSync(path.join(epBdFolders[0], 'BDMV', 'MovieObject.bdmv'), path.join(refDir, 'tsmuxer_ep1_MovieObject.bdmv'));
+    sendLog(`[MT] Stashed pre-patch tsMuxeR nav files at ${refDir}`);
+    project_navRefDir = refDir;
+  } catch (e) {
+    sendLog(`[MT] Could not stash pre-patch nav files: ${e.message}`);
+  }
+
   fixMultiTitleNavigationForEpisodes(bdFolder, episodes.length, ep1TsMuxerPrefix, ep1BdTarget);
+
+  // Stash post-patch nav files alongside the pre-patch ones
+  try {
+    if (project_navRefDir) {
+      fs.copyFileSync(path.join(bdFolder, 'BDMV', 'index.bdmv'), path.join(project_navRefDir, 'patched_index.bdmv'));
+      fs.copyFileSync(path.join(bdFolder, 'BDMV', 'MovieObject.bdmv'), path.join(project_navRefDir, 'patched_MovieObject.bdmv'));
+      sendLog(`[MT] Stashed post-patch nav files at ${project_navRefDir}`);
+    }
+  } catch (e) {
+    sendLog(`[MT] Could not stash post-patch nav files: ${e.message}`);
+  }
 
   // ── Step 4: Validate structure ─────────────────────────────────────────────
   progress(episodes.length * 4 + 2, 'Validating disc structure');
