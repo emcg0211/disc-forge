@@ -159,6 +159,28 @@ async function probeIsoMethod() {
 
 const dumpHex = (buf) => buf.toString('hex').match(/.{1,32}/g).join('\n');
 
+function fpsToTsMuxer(fps) {
+  if (fps == null || fps === '') return '';
+  let num;
+  if (typeof fps === 'string' && fps.includes('/')) {
+    const parts = fps.split('/').map(Number);
+    if (!parts[1] || isNaN(parts[0])) return '';
+    num = parts[0] / parts[1];
+  } else {
+    num = Number(fps);
+    if (isNaN(num)) return '';
+  }
+  if (Math.abs(num - 23.976) < 0.05) return '23.976';
+  if (Math.abs(num - 24)     < 0.05) return '24';
+  if (Math.abs(num - 25)     < 0.05) return '25';
+  if (Math.abs(num - 29.97)  < 0.05) return '29.970';
+  if (Math.abs(num - 30)     < 0.05) return '30';
+  if (Math.abs(num - 50)     < 0.05) return '50';
+  if (Math.abs(num - 59.94)  < 0.05) return '59.940';
+  if (Math.abs(num - 60)     < 0.05) return '60';
+  return num.toFixed(3);
+}
+
 // ── Window ────────────────────────────────────────────────────────────────────
 
 function createWindow() {
@@ -1444,7 +1466,7 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
     const runTsMuxerDirectMkv = () => {
       const metaLines = ['MUXOPT --blu-ray --new-audio-pes'];
 
-      metaLines.push(`${vCodec}, "${tsPath(filePath)}", fps=${fps}, insertSEI, contSPS, track=1`);
+      metaLines.push(`${vCodec}, "${tsPath(filePath)}", fps=${fpsToTsMuxer(fps)}, insertSEI, contSPS, track=1`);
 
       if (audioTracks.length > 0) {
         audioTracks.forEach(t => {
@@ -1470,6 +1492,7 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
       });
 
       const metaFile = path.join(workDir, `tsmuxer_title_${pad(titleIdx)}.meta`);
+      sendLog(`  fpsToTsMuxer: input="${fps}" → output="${fpsToTsMuxer(fps)}"`);
       fs.writeFileSync(metaFile, metaLines.join('\n') + '\n');
       sendLog(`  Attempt 1: tsMuxeR direct from MKV`);
       sendLog(`  meta:\n${metaLines.map(l => '    ' + l).join('\n')}`);
@@ -1749,7 +1772,7 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
         // Track numbers in the combined MKV:
         // track 1 = video, tracks 2..N+1 = audio, tracks N+2.. = PGS subtitles
         let trackNum = 1;
-        metaLines.push(`${vCodec}, "${mkvRef}", fps=${fps}, insertSEI, contSPS, track=${trackNum++}`);
+        metaLines.push(`${vCodec}, "${mkvRef}", fps=${fpsToTsMuxer(fps)}, insertSEI, contSPS, track=${trackNum++}`);
 
         if (audioTracks.length > 0) {
           audioTracks.forEach(t => {
@@ -1769,6 +1792,7 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
         });
 
         const metaFile = path.join(workDir, `tsmuxer_title_${pad(titleIdx)}.meta`);
+        sendLog(`  fpsToTsMuxer: input="${fps}" → output="${fpsToTsMuxer(fps)}"`);
         fs.writeFileSync(metaFile, metaLines.join('\n') + '\n');
         sendLog(`  Step 6: tsMuxeR on combined.mkv`);
         sendLog(`  meta:\n${metaLines.map(l => '    ' + l).join('\n')}`);
@@ -1800,7 +1824,7 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
     const runTsMuxerDirectOnTs = (pgsSubs) => {
       if (!TOOLS.tsmuxer) return reject(new Error(`Title ${titleIdx}: tsMuxeR is required for BD-compliant additional titles`));
       const metaLines = ['MUXOPT --blu-ray --new-audio-pes'];
-      metaLines.push(`${vCodec}, "${tsPath(titleTs)}", fps=${fps}, insertSEI, contSPS, track=1`);
+      metaLines.push(`${vCodec}, "${tsPath(titleTs)}", fps=${fpsToTsMuxer(fps)}, insertSEI, contSPS, track=1`);
       if (audioTracks.length > 0) {
         audioTracks.forEach((t, i) => {
           const codec = STREAM_COPY_FORMATS.has(t.format) ? (aCodecMap[t.format] || 'A_AC3') : 'A_AC3';
@@ -1817,6 +1841,7 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
         metaLines.push(`S_HDMV/PGS, "${tsPath(sub.extractedPath)}", lang=${lang}${forced}${name}`);
       });
       const metaFile = path.join(workDir, `tsmuxer_title_${pad(titleIdx)}.meta`);
+      sendLog(`  fpsToTsMuxer: input="${fps}" → output="${fpsToTsMuxer(fps)}"`);
       fs.writeFileSync(metaFile, metaLines.join('\n') + '\n');
       sendLog(`  Fallback meta:\n${metaLines.map(l => '    ' + l).join('\n')}`);
       cleanup(tempBdFolder);
@@ -1860,7 +1885,7 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
       fs.mkdirSync(subTempBd, { recursive: true });
 
       const subMetaLines = ['MUXOPT --blu-ray --new-audio-pes'];
-      subMetaLines.push(`${vCodec}, "${tsPath(titleTs)}", fps=${fps}, track=1`);
+      subMetaLines.push(`${vCodec}, "${tsPath(titleTs)}", fps=${fpsToTsMuxer(fps)}, track=1`);
       if (audioTracks.length > 0) {
         audioTracks.forEach((t, i) => {
           const codec = STREAM_COPY_FORMATS.has(t.format) ? (aCodecMap[t.format] || 'A_AC3') : 'A_AC3';
@@ -1873,6 +1898,7 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
       // S_TEXT/UTF8 silently causes tsMuxeR --blu-ray to produce no output; text subs excluded.
 
       const subMetaFile = path.join(workDir, `tsmuxer_title_${pad(titleIdx)}_subtmp.meta`);
+      sendLog(`  fpsToTsMuxer: input="${fps}" → output="${fpsToTsMuxer(fps)}"`);
       fs.writeFileSync(subMetaFile, subMetaLines.join('\n') + '\n');
       sendLog(`  Step 3a: tsMuxeR SRT→PGS conversion (video drop expected — known tsMuxeR/ts bug)`);
       sendLog(`  meta:\n${subMetaLines.map(l => '    ' + l).join('\n')}`);
@@ -1918,11 +1944,12 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
 
           // Retry meta: video + audio + SRT subs — audio is AC3 in the .mkv, no mismatch
           const retryMetaLines = ['MUXOPT --blu-ray --new-audio-pes'];
-          retryMetaLines.push(`${vCodec}, "${tsPath(forsubsMkv)}", fps=${fps}, track=1`);
+          retryMetaLines.push(`${vCodec}, "${tsPath(forsubsMkv)}", fps=${fpsToTsMuxer(fps)}, track=1`);
           retryMetaLines.push(`A_AC3, "${tsPath(forsubsMkv)}", track=2`);
           // S_TEXT/UTF8 silently causes tsMuxeR --blu-ray to produce no output; text subs excluded.
 
           const retryMetaFile = path.join(workDir, `tsmuxer_title_${pad(titleIdx)}_subtmp2.meta`);
+          sendLog(`  fpsToTsMuxer: input="${fps}" → output="${fpsToTsMuxer(fps)}"`);
           fs.writeFileSync(retryMetaFile, retryMetaLines.join('\n') + '\n');
           sendLog(`  Step 3a retry: tsMuxeR SRT→PGS using mkvmerge-converted .mkv`);
           sendLog(`  meta:\n${retryMetaLines.map(l => '    ' + l).join('\n')}`);
@@ -2370,7 +2397,7 @@ function writeTsMuxerMeta(project, workDir, tsDir, bdFolder) {
     ? [mainResCorrForMeta.w, mainResCorrForMeta.h]
     : (resDims[project.resolution] || [1920, 1080]);
   const fps = project._safeOutputFps || getVideoFps(project.mainVideo?.path);
-  lines.push(`${vCodec}, "${tsPath(mainTs)}", fps=${fps}, insertSEI, contSPS, track=1`);
+  lines.push(`${vCodec}, "${tsPath(mainTs)}", fps=${fpsToTsMuxer(fps)}, insertSEI, contSPS, track=1`);
 
   const streamTitles = getStreamTitles(mainPath);
   // Returns the tsMuxeR track-name fragment for a given 0-based stream index.
@@ -2467,6 +2494,7 @@ function writeTsMuxerMeta(project, workDir, tsDir, bdFolder) {
     });
   }
 
+  sendLog(`  fpsToTsMuxer: input="${fps}" → output="${fpsToTsMuxer(fps)}"`);
   fs.writeFileSync(metaFile, lines.join('\n') + '\n');
   const debugCopy = require('os').homedir() + '/Desktop/last_tsmuxer.meta';
   fs.writeFileSync(debugCopy, lines.join('\n') + '\n');
