@@ -3375,6 +3375,7 @@ ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discNa
     const srcFps    = parseFloat(getVideoFps(ep.path));
     const srcRes    = detectResolution(ep.path);
     const bdTarget  = selectHwResAndFps(srcFps, srcRes.h);
+    bdTarget.w = 1920; bdTarget.h = 1080; // Force 1080p — 480p BDs rejected by Xbox/LG
     if (i === 0) ep1BdTarget = bdTarget;
     const safeW     = bdTarget.w, safeH = bdTarget.h;
     const safeFps   = getBdFpsFraction(bdTarget.fps);
