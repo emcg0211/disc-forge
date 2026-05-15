@@ -3376,6 +3376,7 @@ ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discNa
     const srcRes    = detectResolution(ep.path);
     const bdTarget  = selectHwResAndFps(srcFps, srcRes.h);
     bdTarget.w = 1920; bdTarget.h = 1080; // Force 1080p — 480p BDs rejected by Xbox/LG
+    sendLog(`[MT] EP${epNum}: forcing 1080p output (source was ${srcRes.w}x${srcRes.h}, target 1920x1080 with letterbox/pillarbox)`);
     if (i === 0) ep1BdTarget = bdTarget;
     const safeW     = bdTarget.w, safeH = bdTarget.h;
     const safeFps   = getBdFpsFraction(bdTarget.fps);
@@ -3428,7 +3429,7 @@ ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discNa
     sendLog(`[MT] EP${epNum}: ${fastEncode ? 'h264_videotoolbox (experimental fast encode)' : 'libx264 Blu-ray-safe CRF20'} L${level}`);
     const needsScale = srcRes.w !== safeW || srcRes.h !== safeH;
     const vfParts = [];
-    if (needsScale) vfParts.push(`scale=${safeW}:${safeH}:force_original_aspect_ratio=decrease,pad=${safeW}:${safeH}:(ow-iw)/2:(oh-ih)/2`);
+    if (needsScale) vfParts.push(`scale=${safeW}:${safeH}:force_original_aspect_ratio=decrease,pad=${safeW}:${safeH}:(ow-iw)/2:(oh-ih)/2:black`);
     if (safeFps) vfParts.push(`fps=${safeFps}`);
     if (vfParts.length) ffArgs.push('-vf', vfParts.join(','));
     ffArgs.push('-c:a', 'ac3', '-b:a', '640k',
