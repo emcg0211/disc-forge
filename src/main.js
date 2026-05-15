@@ -3457,10 +3457,11 @@ ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discNa
     const metaFile  = path.join(epDir, 'tsmuxer.meta');
     const metaLines = [
       'MUXOPT --blu-ray --new-audio-pes',
-      `V_MPEG4/ISO/AVC, "${tsPath(mainBdMkv)}", fps=${safeFps}, insertSEI, contSPS, track=1`,
+      `V_MPEG4/ISO/AVC, "${tsPath(mainBdMkv)}", fps=${fpsToTsMuxer(safeFps)}, insertSEI, contSPS, track=1`,
       `A_AC3, "${tsPath(mainBdMkv)}", lang=und, track=2, default`,
     ];
     fs.writeFileSync(metaFile, metaLines.join('\n') + '\n');
+    try { fs.writeFileSync(require('os').homedir() + '/Desktop/last_mt_episode.meta', metaLines.join('\n') + '\n'); } catch {}
     sendLog(`[MT] EP${epNum} meta:\n${metaLines.map(l => '  ' + l).join('\n')}`);
 
     // Step D: run tsMuxeR
