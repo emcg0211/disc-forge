@@ -3176,10 +3176,10 @@ function fixMultiTitleNavigationForEpisodes(bdFolder, numEpisodes, ep1TsMuxerPre
   const newIndexes = Buffer.alloc(4 + newDataLen);
   newIndexes.writeUInt32BE(newDataLen, 0);
 
-  // FirstPlay → obj[2] (bypass tsMuxeR obj[0] which hangs LG)
-  buildHdmvEntry(2, 0).copy(newIndexes, 4);
-  // TopMenu → obj[2] (autoplay EP1)
-  buildHdmvEntry(2, 0).copy(newIndexes, 4 + ENTRY_SIZE);
+  // FirstPlay → obj[0] (tsMuxeR's default FirstPlay sequence: setup + JumpTitle)
+  buildHdmvEntry(0, 0).copy(newIndexes, 4);
+  // TopMenu → obj[1] (tsMuxeR's default TopMenu)
+  buildHdmvEntry(1, 0).copy(newIndexes, 4 + ENTRY_SIZE);
   // num_titles
   newIndexes.writeUInt16BE(totalTitles, 4 + 2 * ENTRY_SIZE);
   // Title[0]→obj[2] (EP1, PlayPL(1)); Title[i>0]→obj[numObjs+i-1]
