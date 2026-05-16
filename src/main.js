@@ -1182,46 +1182,46 @@ function fixMultiTitleNavigation(bdFolder, numAdditionalTitles) {
   sendLog(`  fixMultiTitleNavigation: MovieObject.bdmv ${numObjs}→${numObjs + numAdditionalTitles} objects, ${mobjBuf.length}→${newMobjBuf.length} bytes`);
 
   // ── 2. index.bdmv: register titles in TitleSearchTable ──────────────────
-  // Indexes struct at IndexesStartAddress:
-  //   +0:  Length (4)
-  //   +4:  FirstPlayback (4)
-  //   +8:  TopMenu (4)
-  //   +12: reserved (?) — empirically: NumberOfTitles starts at DATA_START+8
-  //   The layout verified: FirstPlayback(4)+TopMenu(4)+NumTitles(2)+entries(4 each)
-  //   28 pre-allocated bytes after NumTitles = up to 7 slots before file extension needed
+  // 12-byte BD-ROM HDMV entry layout (per libbluray index_parse.c):
+  //   Indexes block: length(4) + FirstPlay(12) + TopMenu(12) + num_titles(2) + N*Title(12)
+  //   idxDataStart = idxStart + 4  (skip 4-byte length field)
+  //   num_titles   at idxDataStart + 24  (= idxStart + 28)
+  //   first Title  at idxDataStart + 26  (= idxStart + 30)
+  //   id_ref within each 12-byte entry is at byte 6
   const idxBuf       = Buffer.from(fs.readFileSync(indexPath));
   const idxStart     = idxBuf.readUInt32BE(8);  // IndexesStartAddress
   const idxLen       = idxBuf.readUInt32BE(idxStart);
   const idxDataStart = idxStart + 4;
 
-  const NUM_TITLES_OFF = idxDataStart + 8;   // NumberOfTitles field offset
-  const TITLES_OFF     = idxDataStart + 10;  // title entries begin here
+  const ENTRY_SIZE     = 12;
+  const NUM_TITLES_OFF = idxDataStart + 24;  // NumberOfTitles field offset
+  const TITLES_OFF     = idxDataStart + 26;  // title entries begin here
 
   const curNumTitles = idxBuf.readUInt16BE(NUM_TITLES_OFF);
   const newNumTitles = curNumTitles + numAdditionalTitles;
 
-  // Build new 4-byte title entries: HDMV(0x40) | reserved(0x00) | movieObjRef(2 bytes BE)
-  const newEntries = Buffer.alloc(numAdditionalTitles * 4);
+  // Build new 12-byte HDMV title entries
+  const newEntries = Buffer.alloc(numAdditionalTitles * ENTRY_SIZE);
   for (let i = 0; i < numAdditionalTitles; i++) {
     const movieObjIdx = numObjs + i;  // new objects are at indices 3, 4, …
-    newEntries[i * 4 + 0] = 0x40;
-    newEntries[i * 4 + 1] = 0x00;
-    newEntries.writeUInt16BE(movieObjIdx, i * 4 + 2);
+    const off = i * ENTRY_SIZE;
+    newEntries[off] = 0x40;                          // object_type = HDMV
+    newEntries.writeUInt16BE(movieObjIdx, off + 6);  // id_ref at byte 6
     sendLog(`  fixMultiTitleNavigation: Title[${curNumTitles + i}] → MovieObject[${movieObjIdx}]`);
   }
 
-  const remainingSlots = Math.floor((idxLen - 10 - curNumTitles * 4) / 4);
+  const remainingSlots = Math.floor((idxLen - 26 - curNumTitles * ENTRY_SIZE) / ENTRY_SIZE);
   let newIdxBuf;
   if (numAdditionalTitles <= remainingSlots) {
     newIdxBuf = Buffer.from(idxBuf);
     newIdxBuf.writeUInt16BE(newNumTitles, NUM_TITLES_OFF);
-    newEntries.copy(newIdxBuf, TITLES_OFF + curNumTitles * 4);
+    newEntries.copy(newIdxBuf, TITLES_OFF + curNumTitles * ENTRY_SIZE);
   } else {
-    const extraBytes = (numAdditionalTitles - remainingSlots) * 4;
+    const extraBytes = (numAdditionalTitles - remainingSlots) * ENTRY_SIZE;
     newIdxBuf = Buffer.concat([idxBuf, Buffer.alloc(extraBytes)]);
     newIdxBuf.writeUInt32BE(idxLen + extraBytes, idxStart);
     newIdxBuf.writeUInt16BE(newNumTitles, NUM_TITLES_OFF);
-    newEntries.copy(newIdxBuf, TITLES_OFF + curNumTitles * 4);
+    newEntries.copy(newIdxBuf, TITLES_OFF + curNumTitles * ENTRY_SIZE);
     sendLog(`  fixMultiTitleNavigation: extended index.bdmv by ${extraBytes} bytes`);
   }
 
@@ -3227,7 +3227,9 @@ function fixMultiTitleNavigationForEpisodes(bdFolder, numEpisodes, ep1TsMuxerPre
   }
 
   const onDiskIdxStart = onDisk.readUInt32BE(8);
-  const NUM_TITLES_ON_DISK = onDisk.readUInt16BE(onDiskIdxStart + 4 + 8);
+  // 12-byte HDMV layout: length(4) + FirstPlay(12) + TopMenu(12) + num_titles(2)
+  // num_titles is at idxDataStart + 24, i.e. idxStart + 4 + 24 = idxStart + 28
+  const NUM_TITLES_ON_DISK = onDisk.readUInt16BE(onDiskIdxStart + 4 + 24);
   if (NUM_TITLES_ON_DISK !== N) {
     errors.push(`NumberOfTitles on disk = ${NUM_TITLES_ON_DISK}, expected ${N}`);
   }
