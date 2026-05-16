@@ -3160,65 +3160,44 @@ function fixMultiTitleNavigationForEpisodes(bdFolder, numEpisodes, ep1TsMuxerPre
     sendLog(`[MT] fixNav: AppInfoBD patched — video_format=${vf} (${ep1BdTarget.h}p), frame_rate=${fr} (${ep1BdTarget.fps}), byte 46 = 0x${idxBuf[APPINFO_BYTE_46].toString(16).padStart(2, '0')}`);
   }
 
-  const idxStart     = idxBuf.readUInt32BE(8);   // IndexesStartAddress
-  const idxLen       = idxBuf.readUInt32BE(idxStart);
-  const idxDataStart = idxStart + 4;
+  const idxStart = idxBuf.readUInt32BE(8);
+  const ENTRY_SIZE = 12;
 
-  const NUM_TITLES_OFF = idxDataStart + 8;
-  const TITLES_OFF     = idxDataStart + 10;
-
-  const curNumTitles = idxBuf.readUInt16BE(NUM_TITLES_OFF);
-  const newNumTitles = curNumTitles + N;
-
-  const newEntries = Buffer.alloc(N * 4);
-  // Entry 0: Title 1 → obj[2] (EP1, patched to PlayPL(1))
-  newEntries[0] = 0x40;
-  newEntries[1] = 0x00;
-  newEntries.writeUInt16BE(2, 2);
-  sendLog(`[MT] fixNav: index Title[${curNumTitles}] → MovieObject[2] (PlayPL(1) EP1)`);
-  // Entries 1..N-1: Title 2..N → new objects for EP2..EPN
-  for (let i = 1; i < N; i++) {
-    const movieObjIdx = numObjs + (i - 1);
-    newEntries[i * 4 + 0] = 0x40;
-    newEntries[i * 4 + 1] = 0x00;
-    newEntries.writeUInt16BE(movieObjIdx, i * 4 + 2);
-    sendLog(`[MT] fixNav: index Title[${curNumTitles + i}] → MovieObject[${movieObjIdx}] (PlayPL(${i + 1}))`);
+  function buildHdmvEntry(idRef, playbackType /* 0=movie, 1=interactive */) {
+    const e = Buffer.alloc(ENTRY_SIZE);
+    e[0] = 0x40;                                  // object_type=HDMV in top 2 bits
+    e[4] = ((playbackType & 0x03) << 6);          // playback_type in top 2 bits of byte 4
+    e.writeUInt16BE(idRef, 6);                    // id_ref at offset 6 within entry
+    return e;
   }
 
-  const remainingSlots = Math.floor((idxLen - 10 - curNumTitles * 4) / 4);
-  sendLog(`[MT] trace: idxLen=${idxLen} (0x${idxLen.toString(16)}), curNumTitles=${curNumTitles}, N=${N}, remainingSlots=${remainingSlots}, branch=${N <= remainingSlots ? 'slot-fits' : 'extend'}`);
-  let newIdxBuf;
-  if (N <= remainingSlots) {
-    newIdxBuf = Buffer.from(idxBuf);
-    sendLog(`[MT] trace: newIdxBuf[46] post-clone (slot-fits branch) = 0x${newIdxBuf[46].toString(16).padStart(2,'0')}, idxBuf[46] = 0x${idxBuf[46].toString(16).padStart(2,'0')}`);
-    newIdxBuf.writeUInt16BE(newNumTitles, NUM_TITLES_OFF);
-    sendLog(`[MT] trace: newIdxBuf[46] post-numTitles-write = 0x${newIdxBuf[46].toString(16).padStart(2,'0')}`);
-    newEntries.copy(newIdxBuf, TITLES_OFF + curNumTitles * 4);
-    sendLog(`[MT] trace: newIdxBuf[46] post-entries-copy = 0x${newIdxBuf[46].toString(16).padStart(2,'0')}`);
-  } else {
-    const extraBytes = (N - remainingSlots) * 4;
-    newIdxBuf = Buffer.concat([idxBuf, Buffer.alloc(extraBytes)]);
-    sendLog(`[MT] trace: newIdxBuf[46] post-concat (extend branch) = 0x${newIdxBuf[46].toString(16).padStart(2,'0')}, idxBuf[46] = 0x${idxBuf[46].toString(16).padStart(2,'0')}`);
-    newIdxBuf.writeUInt32BE(idxLen + extraBytes, idxStart);
-    newIdxBuf.writeUInt16BE(newNumTitles, NUM_TITLES_OFF);
-    sendLog(`[MT] trace: newIdxBuf[46] post-numTitles-write = 0x${newIdxBuf[46].toString(16).padStart(2,'0')}`);
-    newEntries.copy(newIdxBuf, TITLES_OFF + curNumTitles * 4);
-    sendLog(`[MT] trace: newIdxBuf[46] post-entries-copy = 0x${newIdxBuf[46].toString(16).padStart(2,'0')}`);
-    sendLog(`[MT] fixNav: extended index.bdmv by ${extraBytes} bytes`);
+  const totalTitles = N;
+  const newDataLen = 26 + ENTRY_SIZE * totalTitles;
+  const newIndexes = Buffer.alloc(4 + newDataLen);
+  newIndexes.writeUInt32BE(newDataLen, 0);
+
+  // FirstPlay → obj[2] (bypass tsMuxeR obj[0] which hangs LG)
+  buildHdmvEntry(2, 0).copy(newIndexes, 4);
+  // TopMenu → obj[2] (autoplay EP1)
+  buildHdmvEntry(2, 0).copy(newIndexes, 4 + ENTRY_SIZE);
+  // num_titles
+  newIndexes.writeUInt16BE(totalTitles, 4 + 2 * ENTRY_SIZE);
+  // Title[0]→obj[2] (EP1, PlayPL(1)); Title[i>0]→obj[numObjs+i-1]
+  for (let i = 0; i < totalTitles; i++) {
+    const idRef = (i === 0) ? 2 : (numObjs + i - 1);
+    buildHdmvEntry(idRef, 0).copy(newIndexes, 4 + 2 * ENTRY_SIZE + 2 + i * ENTRY_SIZE);
+    sendLog(`[MT] fixNav: index Title[${i}] → MovieObject[${idRef}] (12-byte HDMV entry)`);
   }
 
-  sendLog(`[MT] trace: newIdxBuf[46] pre-write = 0x${newIdxBuf[46].toString(16).padStart(2,'0')}`);
+  // Reassemble: keep INDX header + AppInfoBD (which has the byte-46 patch),
+  // then append new Indexes section
+  const newIdxBuf = Buffer.concat([idxBuf.slice(0, idxStart), newIndexes]);
 
-  // Redirect FirstPlay from obj[0] → obj[2] to bypass tsMuxeR's obj[0] which hangs LG players
-  const firstPlayMobjRefOff = idxDataStart + 2;  // idxStart+4 (FirstPlay entry) +2 (mobj_id_ref)
-  newIdxBuf.writeUInt16BE(2, firstPlayMobjRefOff);
-  sendLog(`[MT] fixNav: index FirstPlay obj[0] → obj[2] (bypass tsMuxeR obj[0], play EP1 directly)`);
+  sendLog(`[MT] fixNav: index.bdmv REBUILT with 12-byte entries — NumberOfTitles=${totalTitles}, ${idxBuf.length}→${newIdxBuf.length} bytes, Indexes data length=${newDataLen}`);
+  sendLog(`[MT] trace: newIdxBuf[46] post-rebuild = 0x${newIdxBuf[46].toString(16).padStart(2,'0')}`);
 
   fs.writeFileSync(indexPath, newIdxBuf);
   verifyWrite('index.bdmv', newIdxBuf, indexPath);
-  const fpBytes = newIdxBuf.slice(idxDataStart, idxDataStart + 4);
-  sendLog(`[MT] fixNav: index FirstPlay bytes [${idxDataStart}..${idxDataStart+3}] = ${fpBytes.toString('hex')} (flags=0x${fpBytes.readUInt16BE(0).toString(16).padStart(4,'0')} mobj_id_ref=0x${fpBytes.readUInt16BE(2).toString(16).padStart(4,'0')})`);
-  sendLog(`[MT] fixNav: index.bdmv NumberOfTitles ${curNumTitles}→${newNumTitles}, ${idxBuf.length}→${newIdxBuf.length} bytes`);
   sendLog(`[MT] fixNav: index.bdmv after — ${newIdxBuf.length} bytes:\n${dumpHex(newIdxBuf)}`);
 
   // ── 3. BACKUP copies ────────────────────────────────────────────────────────
