@@ -3147,18 +3147,9 @@ function fixMultiTitleNavigationForEpisodes(bdFolder, numEpisodes, ep1TsMuxerPre
   // ── 2. index.bdmv: read tsMuxeR file, append N-1 title entries ─────────────
   // tsMuxeR's existing Title 1 → obj[2] covers EP1. Add entries for EP2..EPN only.
   const idxBuf       = Buffer.from(fs.readFileSync(indexPath));
-  sendLog(`[MT] trace: idxBuf[46] post-read = 0x${idxBuf[46].toString(16).padStart(2,'0')}`);
   sendLog(`[MT] fixNav: index.bdmv before — ${idxBuf.length} bytes:\n${dumpHex(idxBuf)}`);
 
-  // Patch AppInfoBD video_format and frame_rate (tsMuxeR leaves these zeroed)
-  if (ep1BdTarget) {
-    const vf = videoFormatMap[ep1BdTarget.h] || 6;
-    const fr = frameRateMap(ep1BdTarget.fps);
-    const APPINFO_BYTE_46 = 46;
-    idxBuf[APPINFO_BYTE_46] = (vf << 4) | (fr & 0x0f);
-    sendLog(`[MT] trace: idxBuf[46] post-AppInfoBD-patch = 0x${idxBuf[46].toString(16).padStart(2,'0')}`);
-    sendLog(`[MT] fixNav: AppInfoBD patched — video_format=${vf} (${ep1BdTarget.h}p), frame_rate=${fr} (${ep1BdTarget.fps}), byte 46 = 0x${idxBuf[APPINFO_BYTE_46].toString(16).padStart(2, '0')}`);
-  }
+  sendLog(`[MT] fixNav: skipping AppInfoBD byte-46 patch (field doesn't exist in BD-ROM spec — video_format is in MPLS/CLPI/m2ts PMT)`);
 
   const idxStart = idxBuf.readUInt32BE(8);
   const ENTRY_SIZE = 12;
@@ -3177,9 +3168,9 @@ function fixMultiTitleNavigationForEpisodes(bdFolder, numEpisodes, ep1TsMuxerPre
   newIndexes.writeUInt32BE(newDataLen, 0);
 
   // FirstPlay → obj[0] (tsMuxeR's default FirstPlay sequence: setup + JumpTitle)
-  buildHdmvEntry(0, 0).copy(newIndexes, 4);
+  buildHdmvEntry(0, 1).copy(newIndexes, 4);
   // TopMenu → obj[1] (tsMuxeR's default TopMenu)
-  buildHdmvEntry(1, 0).copy(newIndexes, 4 + ENTRY_SIZE);
+  buildHdmvEntry(1, 1).copy(newIndexes, 4 + ENTRY_SIZE);
   // num_titles
   newIndexes.writeUInt16BE(totalTitles, 4 + 2 * ENTRY_SIZE);
   // Title[0]→obj[2] (EP1, PlayPL(1)); Title[i>0]→obj[numObjs+i-1]
@@ -3189,12 +3180,10 @@ function fixMultiTitleNavigationForEpisodes(bdFolder, numEpisodes, ep1TsMuxerPre
     sendLog(`[MT] fixNav: index Title[${i}] → MovieObject[${idRef}] (12-byte HDMV entry)`);
   }
 
-  // Reassemble: keep INDX header + AppInfoBD (which has the byte-46 patch),
-  // then append new Indexes section
+  // Reassemble: keep INDX header + AppInfoBD, then append new Indexes section
   const newIdxBuf = Buffer.concat([idxBuf.slice(0, idxStart), newIndexes]);
 
   sendLog(`[MT] fixNav: index.bdmv REBUILT with 12-byte entries — NumberOfTitles=${totalTitles}, ${idxBuf.length}→${newIdxBuf.length} bytes, Indexes data length=${newDataLen}`);
-  sendLog(`[MT] trace: newIdxBuf[46] post-rebuild = 0x${newIdxBuf[46].toString(16).padStart(2,'0')}`);
 
   fs.writeFileSync(indexPath, newIdxBuf);
   verifyWrite('index.bdmv', newIdxBuf, indexPath);
@@ -3218,13 +3207,6 @@ function fixMultiTitleNavigationForEpisodes(bdFolder, numEpisodes, ep1TsMuxerPre
   if (onDisk.slice(0, 4).toString('ascii') !== 'INDX') errors.push('INDX magic missing');
   if (onDisk.slice(4, 8).toString('ascii') !== '0200') errors.push('version != 0200');
   if (onDisk.readUInt32BE(12) !== 0) errors.push(`ExtensionDataStartAddress = ${onDisk.readUInt32BE(12)}, expected 0`);
-
-  if (ep1BdTarget) {
-    const expectedVfFr = ((videoFormatMap[ep1BdTarget.h] || 6) << 4) | (frameRateMap(ep1BdTarget.fps) & 0x0f);
-    if (onDisk[46] !== expectedVfFr) {
-      errors.push(`AppInfoBD byte 46 on disk = 0x${onDisk[46].toString(16).padStart(2,'0')}, expected 0x${expectedVfFr.toString(16).padStart(2,'0')}`);
-    }
-  }
 
   const onDiskIdxStart = onDisk.readUInt32BE(8);
   // 12-byte HDMV layout: length(4) + FirstPlay(12) + TopMenu(12) + num_titles(2)
