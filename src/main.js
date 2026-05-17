@@ -2602,6 +2602,13 @@ function validateMuxOutput(tsDir) {
 
 function validateHwBuild(project, workDir, bdFolder) {
   return new Promise((resolve, reject) => {
+    // Multi-title builds use the fixNav verification instead of this
+    // single-title-only hardware safety validator
+    const isMultiTitle = (project.titles || []).length > 0;
+    if (isMultiTitle) {
+      sendLog('Pre-burn validation: skipped (multi-title build uses fixNav verification)');
+      return resolve();
+    }
     sendLog('Pre-burn validation checklist');
     const errors = [];
 
