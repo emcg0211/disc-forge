@@ -2761,6 +2761,209 @@ function patchMplsForTrickPlay(bdFolder) {
   sendLog(`[FF/RW] Trick-play patch complete: ${patched}/${allMpls.length} MPLS file(s) updated`);
 }
 
+// ── Phase 4: Menu Lite Splash ──────────────────────────────────────────────────
+// Inserts a 5-second splash screen as playlist 00000 before the main feature.
+//
+// BD HDMV VM note: PLAY_PL is synchronous — the VM blocks until the playlist
+// finishes, then continues to the next instruction.
+//
+// Strategy:
+//   1. Encode a 5s still PNG → .ts → .mkv → tsMuxeR → splash BDMV (as playlist 00000)
+//   2. Copy splash stream/clip/playlist into the disc BDMV
+//   3. Renumber existing playlists: 00001 → 00001 (already correct for single-title
+//      discs), or shift multi-title playlists if needed
+//   4. Modify MovieObject.bdmv Object[2] (main player): prepend PLAY_PL(0) before
+//      the existing PLAY_PL(1) command
+//
+// Limitation: only implemented for discs where tsMuxeR assigns playlist 00000
+// to the menu stub and 00001 to the main feature (the standard single-title case).
+// Multi-title discs use 00001..N, FirstPlay via Object[2] → PLAY_PL(00001), which
+// is already handled.
+//
+// For single-title: Object[2] currently ends with PLAY_PL(1).
+// After splash patch: Object[2] ends with PLAY_PL(0) then PLAY_PL(1).
+// The splash playlist 00000 plays for 5s, auto-terminates, then main feature plays.
+//
+// NOTE: If the disc already has a menu stub at 00000.m2ts, the splash replaces/
+// precedes it by modifying the object command sequence only.
+
+async function addSplashToDisc(bdFolder, splashPngPath, workDir) {
+  if (!fs.existsSync(splashPngPath)) {
+    sendLog('[Splash] splashPngPath not found — skipping splash');
+    return;
+  }
+
+  const streamDir  = path.join(bdFolder, 'BDMV', 'STREAM');
+  const clipDir    = path.join(bdFolder, 'BDMV', 'CLIPINF');
+  const playDir    = path.join(bdFolder, 'BDMV', 'PLAYLIST');
+  const backDir    = path.join(bdFolder, 'BDMV', 'BACKUP');
+  const mobjPath   = path.join(bdFolder, 'BDMV', 'MovieObject.bdmv');
+
+  if (!fs.existsSync(mobjPath)) {
+    sendLog('[Splash] MovieObject.bdmv not found — skipping splash');
+    return;
+  }
+
+  // ── Step 1: Encode splash PNG to 5-second .ts ─────────────────────────────
+  const splashTs  = path.join(workDir, 'splash.ts');
+  const splashMkv = path.join(workDir, 'splash_bd.mkv');
+  const splashBd  = path.join(workDir, 'splash_bd');
+
+  sendLog('[Splash] Encoding 5-second splash PNG → TS');
+  await new Promise((resolve, reject) => {
+    const ffArgs = ['-y', '-loop', '1', '-i', splashPngPath,
+      '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo',
+      '-c:v', 'libx264', '-preset', 'fast',
+      '-profile:v', 'high', '-level', '4.1',
+      '-pix_fmt', 'yuv420p', '-crf', '23',
+      '-maxrate', '25000k', '-bufsize', '30000k',
+      '-g', '24', '-keyint_min', '24', '-sc_threshold', '0',
+      '-c:a', 'ac3', '-b:a', '64k',
+      '-t', '5', '-f', 'mpegts', '-mpegts_flags', 'system_b', splashTs];
+    const ff = spawn(TOOLS.ffmpeg, ffArgs);
+    let stderr = '';
+    ff.stderr.on('data', d => { stderr += d.toString(); });
+    ff.on('close', code => {
+      if (code !== 0 || !fs.existsSync(splashTs)) {
+        sendLog(`[Splash] FFmpeg failed (${code}) — ${stderr.slice(-300)}`);
+        sendLog('[Splash] Skipping splash due to FFmpeg error');
+        resolve(false);
+      } else {
+        sendLog(`[Splash] Splash TS: ${(fs.statSync(splashTs).size/1e3).toFixed(0)} KB`);
+        resolve(true);
+      }
+    });
+    ff.on('error', err => { sendLog(`[Splash] FFmpeg error: ${err.message}`); resolve(false); });
+  }).then(async ok => {
+    if (!ok) return;
+
+    // ── Step 2: mkvmerge → .mkv ────────────────────────────────────────────
+    await new Promise((resolve2) => {
+      const mkv = spawn(TOOLS.mkvmerge, ['-o', splashMkv, splashTs]);
+      mkv.on('close', code2 => {
+        if ((code2 !== 0 && code2 !== 1) || !fs.existsSync(splashMkv)) {
+          sendLog('[Splash] mkvmerge failed — skipping splash'); resolve2(false);
+        } else { sendLog(`[Splash] Splash MKV: ${(fs.statSync(splashMkv).size/1e3).toFixed(0)} KB`); resolve2(true); }
+      });
+      mkv.on('error', err => { sendLog(`[Splash] mkvmerge error: ${err.message}`); resolve2(false); });
+    }).then(async ok2 => {
+      if (!ok2) return;
+
+      // ── Step 3: tsMuxeR → splash BDMV ─────────────────────────────────────
+      const splashMeta = path.join(workDir, 'splash.meta');
+      fs.writeFileSync(splashMeta, [
+        'MUXOPT --blu-ray --new-audio-pes',
+        `V_MPEG4/ISO/AVC, "${tsPath(splashMkv)}", fps=24000/1001, insertSEI, contSPS, track=1`,
+        `A_AC3, "${tsPath(splashMkv)}", lang=und, track=2, default`,
+      ].join('\n') + '\n');
+      fs.mkdirSync(splashBd, { recursive: true });
+      await new Promise((resolve3) => {
+        const ts = spawn(TOOLS.tsmuxer, [splashMeta, splashBd]);
+        ts.on('close', code3 => {
+          const splashStream = path.join(splashBd, 'BDMV', 'STREAM', '00000.m2ts');
+          if (code3 !== 0 || !fs.existsSync(splashStream) || fs.statSync(splashStream).size < 1000) {
+            sendLog('[Splash] tsMuxeR failed or empty output — skipping splash'); resolve3(false);
+          } else {
+            sendLog(`[Splash] Splash M2TS: ${(fs.statSync(splashStream).size/1e3).toFixed(0)} KB`);
+            resolve3(true);
+          }
+        });
+        ts.on('error', err => { sendLog(`[Splash] tsMuxeR error: ${err.message}`); resolve3(false); });
+      }).then(ok3 => {
+        if (!ok3) return;
+
+        // ── Step 4: Rename existing playlist 00000 → skip (splash takes 00000) ─
+        // In a tsMuxeR disc with menu: 00000=menu-stub, 00001=main-feature
+        // We replace the menu-stub stream/clip/playlist with our splash content.
+        const splashStream  = path.join(splashBd, 'BDMV', 'STREAM', '00000.m2ts');
+        const splashClpi    = path.join(splashBd, 'BDMV', 'CLIPINF', '00000.clpi');
+        const splashMpls    = path.join(splashBd, 'BDMV', 'PLAYLIST', '00000.mpls');
+        const splashBackup  = path.join(splashBd, 'BDMV', 'BACKUP');
+
+        // Copy splash files into disc BDMV
+        try {
+          fs.copyFileSync(splashStream, path.join(streamDir, '00000.m2ts'));
+          if (fs.existsSync(splashClpi)) {
+            fs.copyFileSync(splashClpi, path.join(clipDir, '00000.clpi'));
+            if (fs.existsSync(backDir)) fs.copyFileSync(splashClpi, path.join(backDir, '00000.clpi'));
+          }
+          if (fs.existsSync(splashMpls)) {
+            fs.copyFileSync(splashMpls, path.join(playDir, '00000.mpls'));
+            if (fs.existsSync(backDir)) {
+              const backMpls = path.join(backDir, 'PLAYLIST', '00000.mpls');
+              const backMplsDir = path.dirname(backMpls);
+              if (!fs.existsSync(backMplsDir)) fs.mkdirSync(backMplsDir, { recursive: true });
+              fs.copyFileSync(splashMpls, backMpls);
+              fs.copyFileSync(splashMpls, path.join(backDir, '00000.mpls'));
+            }
+          }
+          sendLog('[Splash] Splash BDMV files copied into disc structure');
+        } catch(e) {
+          sendLog(`[Splash] File copy error: ${e.message} — skipping navigation patch`);
+          return;
+        }
+
+        // ── Step 5: Patch MovieObject.bdmv Object[2] to PLAY_PL(0) then PLAY_PL(1) ──
+        // Object[2] is the main player: …PSR setup…, PLAY_PL(1)
+        // We insert PLAY_PL(0) as the second-to-last command.
+        try {
+          const mobj = Buffer.from(fs.readFileSync(mobjPath));
+          const MOBJ_STRUCT_OFF = 40;
+          const NUM_OBJS_OFF    = 48;
+          const mobjLength = mobj.readUInt32BE(MOBJ_STRUCT_OFF);
+          const numObjs    = mobj.readUInt16BE(NUM_OBJS_OFF);
+
+          // Find Object[2]
+          let pos2 = NUM_OBJS_OFF + 2;
+          let obj2Start = -1, obj2Size = 0;
+          for (let i2 = 0; i2 < numObjs; i2++) {
+            const nc = mobj.readUInt16BE(pos2 + 2);
+            if (i2 === 2) { obj2Start = pos2; obj2Size = 4 + nc * 12; }
+            pos2 += 4 + nc * 12;
+          }
+
+          if (obj2Start < 0) {
+            sendLog('[Splash] Object[2] not found — skipping navigation patch');
+            return;
+          }
+
+          // Insert PLAY_PL(0) (0x22800000 w1=0 w2=0) before the last command of Object[2]
+          const PLAY_PL_SPLASH = Buffer.alloc(12);
+          PLAY_PL_SPLASH.writeUInt32BE(0x22800000, 0);  // PLAY_PL opcode
+          PLAY_PL_SPLASH.writeUInt32BE(0x00000000, 4);  // playlist 0 (splash)
+          PLAY_PL_SPLASH.writeUInt32BE(0x00000000, 8);
+
+          // New Object[2] = original first (numCmds-1) commands + PLAY_PL(0) + last command
+          const origNumCmds = mobj.readUInt16BE(obj2Start + 2);
+          const obj2Body    = mobj.slice(obj2Start + 4, obj2Start + obj2Size);
+          const lastCmd     = obj2Body.slice((origNumCmds - 1) * 12);
+          const priorCmds   = obj2Body.slice(0, (origNumCmds - 1) * 12);
+          const newNumCmds  = origNumCmds + 1;
+          const newObj2     = Buffer.alloc(4 + newNumCmds * 12);
+          newObj2.writeUInt16BE(mobj.readUInt16BE(obj2Start), 0);     // flags
+          newObj2.writeUInt16BE(newNumCmds, 2);
+          priorCmds.copy(newObj2, 4);
+          PLAY_PL_SPLASH.copy(newObj2, 4 + (origNumCmds - 1) * 12);
+          lastCmd.copy(newObj2, 4 + origNumCmds * 12);
+
+          const before = mobj.slice(0, obj2Start);
+          const after  = mobj.slice(obj2Start + obj2Size);
+          const newMobj = Buffer.concat([before, newObj2, after]);
+          newMobj.writeUInt32BE(mobjLength + 12, MOBJ_STRUCT_OFF);    // updated length
+
+          fs.writeFileSync(mobjPath, newMobj);
+          if (fs.existsSync(backDir)) {
+            fs.copyFileSync(mobjPath, path.join(backDir, 'MovieObject.bdmv'));
+          }
+          sendLog(`[Splash] MovieObject.bdmv patched: Object[2] now has ${newNumCmds} cmds (splash→main)`);
+        } catch(e) {
+          sendLog(`[Splash] MovieObject patch error: ${e.message}`);
+        }
+      });
+    });
+  });
+}
+
 // ── Step 7: Package ISO ────────────────────────────────────────────────────────
 // Uses bestIsoMethod detected at startup — no per-build detection.
 
