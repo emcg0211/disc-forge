@@ -187,6 +187,9 @@ async function boot() {
   });
 
   // Apply light mode on startup
+  const savedTheme = localStorage.getItem('disc-forge-theme');
+  if (savedTheme === 'light') state.lightMode = true;
+  else if (savedTheme === 'dark') state.lightMode = false;
   document.body.classList.toggle('light-mode', state.lightMode);
 }
 
@@ -838,6 +841,7 @@ function menuPreviewHTML() {
 
 // ── Render ─────────────────────────────────────────────────────────────────────
 function render() {
+  document.body.classList.toggle('light-mode', state.lightMode);
   // Save scroll position before re-render
   const scroller = document.querySelector('.content');
   const scrollTop = scroller ? scroller.scrollTop : 0;
@@ -892,7 +896,7 @@ function titlebarHTML(tools) {
     </div>
     <div class="titlebar-spacer"></div>
     <div class="titlebar-tools">
-      <button class="btn btn-ghost btn-sm" id="toggle-theme" title="Toggle light/dark mode" style="font-size:14px;padding:4px 8px">${state.lightMode ? '🌙' : '☀️'}</button>
+      <button class="btn btn-ghost btn-sm" id="toggle-theme" style="font-size:14px;padding:4px 8px" title="Toggle theme">${state.lightMode ? '🌙' : '☀'}</button>
       <button class="btn btn-ghost btn-sm" id="about-btn" style="font-size:12px;padding:4px 8px">About</button>
       ${pill('FFmpeg',  tools.ffmpeg.found)}
       ${tools.tsmuxer.found ? pill('tsMuxeR', true) : '<div class="tool-pill warn"><div class="tool-dot warn"></div>tsMuxeR (optional)</div>'}
@@ -2230,9 +2234,9 @@ function attachListeners() {
   document.getElementById('pick-mkv-file')?.addEventListener('click', pickMkvFile);
   // Light mode toggle
   document.getElementById('toggle-theme')?.addEventListener('click', () => {
-    state.lightMode = !state.lightMode;
-    document.body.classList.toggle('light-mode', state.lightMode);
-    render();
+    const isLight = !state.lightMode;
+    localStorage.setItem('disc-forge-theme', isLight ? 'light' : 'dark');
+    setState({ lightMode: isLight });
   });
 
   // Subtitle description
