@@ -591,10 +591,10 @@ ipcMain.handle('build-disc', async (_, project) => {
   project.extras         = project.extras         || [];
   project.titles         = project.titles         || [];
 
+  // forceSafeBluRayOutput controls validation strictness + forced transcode.
+  // It MUST NOT strip features — titles must flow through so multi-title routing fires.
   if (project.forceSafeBluRayOutput) {
-    sendLog('Blu-ray safe: skipping menu/extras/additional titles');
-    project.extras = [];
-    project.titles = [];
+    sendLog('Blu-ray safe mode: strict validation + forced transcode (titles preserved)');
   }
 
   // ── Source video probing: map to a valid BD-Video format via selectHwResAndFps ──
