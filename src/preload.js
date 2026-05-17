@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld('discForge', {
   openFolderDialog: ()        => ipcRenderer.invoke('open-folder-dialog'),
   probeFile:        (filePath)=> ipcRenderer.invoke('probe-file', filePath),
   buildDisc:        (project) => ipcRenderer.invoke('build-disc', project),
+  buildMultiTitleDisc: (args) => ipcRenderer.invoke('build-multi-title-disc', args),
   revealInFinder:   (filePath)=> ipcRenderer.invoke('reveal-in-finder', filePath),
 
   // Build events

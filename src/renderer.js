@@ -414,7 +414,24 @@ async function startBuild() {
       ...embeddedSubs.map(t => ({ ...t, file: { path: t.sourceFile, name: t.sourceFileName }, embedded: true })),
     ],
   };
-  const result = await window.discForge.buildDisc(buildProject);
+  // Multi-title routing: 2+ video sources (mainVideo + titles) → per-episode mux pipeline
+  const allEpisodes = [
+    ...(p.mainVideo ? [{ path: p.mainVideo.path }] : []),
+    ...((p.titles || []).map(t => ({ path: t.file?.path })).filter(e => e.path)),
+  ];
+  let result;
+  if (allEpisodes.length >= 2) {
+    appendLog(`[Renderer] Multi-title routing: ${allEpisodes.length} episodes → buildMultiTitleDisc`);
+    result = await window.discForge.buildMultiTitleDisc({
+      episodes: allEpisodes,
+      outputDir: p.outputDir,
+      discName: p.title,
+      fastEncode: false,
+    });
+  } else {
+    appendLog(`[Renderer] Single-title routing → buildDisc`);
+    result = await window.discForge.buildDisc(buildProject);
+  }
   if (result.error) setState({ buildError: result.error });
 }
 function appendLog(msg) {
