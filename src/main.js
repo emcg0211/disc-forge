@@ -698,6 +698,10 @@ ipcMain.handle('build-disc', async (_, project) => {
       label: 'Pre-burn validation',
       fn: () => validateHwBuild(project, workDir, bdFolder),
     }] : []),
+    { label: 'Unlocking FF/RW (patching MPLS trick-play flags)', fn: () => {
+      patchMplsForTrickPlay(bdFolder);
+      return Promise.resolve();
+    } },
     { label: 'Packaging ISO image', fn: async () => {
       const _path = require('path'), _fs = require('fs');
       const bdmvContents = _fs.readdirSync(_path.join(bdFolder,'BDMV')).join(', ');
@@ -837,6 +841,7 @@ function muxMainFeature(project, workDir, tsDir) {
       '720p (1280×720)':    [1280, 720],
       '480p (720×480)':     [720,  480],
       '480p (720×576) PAL': [720,  576],
+      '4K UHD (3840×2160) — for testing only, NOT BD-ROM spec, will not play on standard Blu-ray players': [3840, 2160],
     };
     const [, mainVH] = mainResDims[project.resolution] || [1920, 1080];
     const mainSrcRes = detectResolution(mainPath);
@@ -1444,6 +1449,7 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
       '720p (1280×720)':    [1280, 720],
       '480p (720×480)':     [720,  480],
       '480p (720×576) PAL': [720,  576],
+      '4K UHD (3840×2160) — for testing only, NOT BD-ROM spec, will not play on standard Blu-ray players': [3840, 2160],
     };
     const srcRes = detectResolution(filePath);
     const resCorrTarget = (srcRes.w && srcRes.h) ? getBdCompliantResolution(srcRes.w, srcRes.h) : null;
@@ -2392,6 +2398,7 @@ function writeTsMuxerMeta(project, workDir, tsDir, bdFolder) {
     '720p (1280×720)':    [1280, 720],
     '480p (720×480)':     [720,  480],
     '480p (720×576) PAL': [720,  576],
+    '4K UHD (3840×2160) — for testing only, NOT BD-ROM spec, will not play on standard Blu-ray players': [3840, 2160],
   };
   const mainSrcResForMeta = detectResolution(project.mainVideo?.path || '');
   const mainResCorrForMeta = (mainSrcResForMeta.w && mainSrcResForMeta.h)
@@ -2675,6 +2682,83 @@ function validateHwBuild(project, workDir, bdFolder) {
     sendLog('  All pre-burn checks passed.');
     resolve();
   });
+}
+
+// ── FF/RW Unlock: Patch MPLS UO masks + random_access_flag ───────────────────
+// BD spec: UO_mask_flags in each PlayItem has 1=prohibited bits.
+// tsMuxeR sets byte 0 = 0x3E (prohibits fast-forward, rewind, slow, pause, still)
+// and random_access_flag = 0.  Clearing all UO bits + setting RAF=1 makes
+// libbluray set PSR4 = 0xFFFF (all user operations permitted), enabling FF/RW.
+//
+// Applied to BDMV/PLAYLIST/*.mpls and BDMV/BACKUP/*.mpls (tsMuxeR's backup copies
+// land directly in BACKUP/, not BACKUP/PLAYLIST/).
+
+function patchMplsForTrickPlay(bdFolder) {
+  const glob = (dir, ext) => {
+    try {
+      return fs.readdirSync(dir)
+        .filter(f => f.endsWith(ext))
+        .map(f => path.join(dir, f));
+    } catch(_) { return []; }
+  };
+
+  const playlistDir = path.join(bdFolder, 'BDMV', 'PLAYLIST');
+  const backupDir   = path.join(bdFolder, 'BDMV', 'BACKUP');
+  const backupPlaylistDir = path.join(bdFolder, 'BDMV', 'BACKUP', 'PLAYLIST');
+
+  const allMpls = [
+    ...glob(playlistDir, '.mpls'),
+    ...glob(backupDir, '.mpls'),
+    ...glob(backupPlaylistDir, '.mpls'),
+  ];
+
+  if (allMpls.length === 0) {
+    sendLog('[FF/RW] No MPLS files found — skipping trick-play patch');
+    return;
+  }
+
+  let patched = 0;
+  for (const mplsPath of allMpls) {
+    try {
+      const data = Buffer.from(fs.readFileSync(mplsPath));
+      if (data.slice(0, 4).toString('ascii') !== 'MPLS') continue;
+
+      const playlistStart = data.readUInt32BE(8);
+      const numItems = data.readUInt16BE(playlistStart + 6);
+      let itemPos = playlistStart + 10;
+      let modified = false;
+
+      for (let i = 0; i < numItems; i++) {
+        const itemLen = data.readUInt16BE(itemPos);
+        const itemDataStart = itemPos + 2;
+
+        // Clear all 8 UO_mask_flags bytes (offset +19 from item data start)
+        const uoOffset = itemDataStart + 19;
+        for (let j = 0; j < 8; j++) {
+          if (data[uoOffset + j] !== 0) { data[uoOffset + j] = 0; modified = true; }
+        }
+
+        // Set random_access_flag = 1 (offset +27 from item data start)
+        const rafOffset = itemDataStart + 27;
+        if (data[rafOffset] !== 0x01) { data[rafOffset] = 0x01; modified = true; }
+
+        itemPos += itemLen + 2;
+      }
+
+      // AppInfoPlayList flags byte at 0x38: set bit 7 (disc-level random access)
+      if (!(data[0x38] & 0x80)) { data[0x38] |= 0x80; modified = true; }
+
+      if (modified) {
+        fs.writeFileSync(mplsPath, data);
+        sendLog(`[FF/RW] Patched: ${path.basename(mplsPath)} — UO masks cleared, random_access_flag=1`);
+        patched++;
+      }
+    } catch(e) {
+      sendLog(`[FF/RW] Warning: could not patch ${path.basename(mplsPath)}: ${e.message}`);
+    }
+  }
+
+  sendLog(`[FF/RW] Trick-play patch complete: ${patched}/${allMpls.length} MPLS file(s) updated`);
 }
 
 // ── Step 7: Package ISO ────────────────────────────────────────────────────────
@@ -3245,7 +3329,7 @@ function fixMultiTitleNavigationForEpisodes(bdFolder, numEpisodes, ep1TsMuxerPre
 // Pipeline per episode: FFmpeg (libx264/AC3) → mkvmerge → tsMuxeR (--blu-ray)
 // Then merge all BDMV outputs and fix navigation.
 
-ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discName, fastEncode }) => {
+ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discName, fastEncode, resolution }) => {
   if (!TOOLS.ffmpeg)   return { error: 'FFmpeg not found.\n\nInstall: brew install ffmpeg' };
   if (!TOOLS.tsmuxer)  return { error: 'tsMuxeR not found.\n\nInstall: brew install --cask tsmuxer' };
   if (!TOOLS.mkvmerge) return { error: 'mkvmerge not found.\n\nInstall: brew install mkvtoolnix' };
@@ -3354,8 +3438,20 @@ ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discNa
     const srcFps    = parseFloat(getVideoFps(ep.path));
     const srcRes    = detectResolution(ep.path);
     const bdTarget  = selectHwResAndFps(srcFps, srcRes.h);
-    bdTarget.w = 1920; bdTarget.h = 1080; // Force 1080p — 480p BDs rejected by Xbox/LG
-    sendLog(`[MT] EP${epNum}: forcing 1080p output (source was ${srcRes.w}x${srcRes.h}, target 1920x1080 with letterbox/pillarbox)`);
+
+    // Honor user-selected resolution from the dropdown.
+    // Default: 1080p (most compatible). 4K is non-standard but allowed for testing.
+    const MT_RES_DIMS = {
+      '1080p (1920×1080)':  [1920, 1080],
+      '720p (1280×720)':    [1280, 720],
+      '480p (720×480)':     [720,  480],
+      '480p (720×576) PAL': [720,  576],
+      '4K UHD (3840×2160) — for testing only, NOT BD-ROM spec, will not play on standard Blu-ray players': [3840, 2160],
+    };
+    const chosenRes = (resolution && MT_RES_DIMS[resolution]) ? MT_RES_DIMS[resolution] : [1920, 1080];
+    bdTarget.w = chosenRes[0];
+    bdTarget.h = chosenRes[1];
+    sendLog(`[MT] EP${epNum}: resolution=${resolution || '(default)'} → ${bdTarget.w}x${bdTarget.h} (source was ${srcRes.w}x${srcRes.h})`);
     if (i === 0) ep1BdTarget = bdTarget;
     const safeW     = bdTarget.w, safeH = bdTarget.h;
     const safeFps   = getBdFpsFraction(bdTarget.fps);
@@ -3368,7 +3464,12 @@ ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discNa
     const mainTs    = path.join(epTsDir, 'main.ts');
     const mainBdMkv = path.join(epDir, 'main_bd.mkv');
 
-    // Warn about tracks that will be silently dropped by '-map 0:v:0 -map 0:a:0'
+    // ── Audio track selection for this episode ──────────────────────────────────
+    // ep.audioTracks comes from renderer (user-selected or auto-detected).
+    // If none supplied, probe the source and smart-select: prefer 5.1 > stereo > mono.
+    // Tracks are referenced by their stream index in the source file.
+    let epAudioTracks = (ep.audioTracks || []).filter(t => !t.excluded);
+
     if (TOOLS.ffprobe) {
       try {
         const { execFileSync } = require('child_process');
@@ -3378,20 +3479,49 @@ ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discNa
           { encoding: 'utf8', timeout: 15000 }
         );
         const streams   = JSON.parse(probeOut).streams || [];
-        const numAudio  = streams.filter(s => s.codec_type === 'audio').length;
+        const audioStreams = streams.filter(s => s.codec_type === 'audio');
         const numSubs   = streams.filter(s => s.codec_type === 'subtitle').length;
-        if (numAudio > 1) {
-          sendLog(`[MT] EP${epNum}: WARNING — source has ${numAudio} audio tracks, 1 included`);
+
+        sendLog(`[MT] EP${epNum}: source has ${audioStreams.length} audio track(s), ${numSubs} subtitle(s)`);
+        audioStreams.forEach((s, idx) => {
+          const chLayout = s.channel_layout || `${s.channels}ch`;
+          sendLog(`[MT] EP${epNum}:   audio[${idx}] stream#${s.index}: ${s.codec_name} ${chLayout} (${s.tags?.language || 'und'})`);
+        });
+
+        if (epAudioTracks.length === 0 && audioStreams.length > 0) {
+          // Smart-select: prefer 5.1+ (channels>=6) > stereo (2ch) > mono (1ch)
+          const score = s => {
+            const ch = s.channels || 1;
+            if (ch >= 6) return 3;
+            if (ch >= 2) return 2;
+            return 1;
+          };
+          const sorted = [...audioStreams].sort((a, b) => score(b) - score(a));
+          epAudioTracks = sorted.map(s => ({
+            trackIndex: s.index,
+            language: s.tags?.language || 'und',
+            format: 'Dolby Digital 5.1',
+            channels: s.channels || 1,
+          }));
+          sendLog(`[MT] EP${epNum}: auto-selected ${epAudioTracks.length} audio track(s) — preferred: stream#${sorted[0]?.index} (${sorted[0]?.channels || 1}ch)`);
+        } else if (epAudioTracks.length === 0) {
+          // No audio at all — fall back to track 2 in tsMuxeR meta
+          sendLog(`[MT] EP${epNum}: no audio streams detected`);
         }
+
         if (numSubs > 0) {
-          sendLog(`[MT] EP${epNum}: WARNING — source has ${numSubs} subtitle track${numSubs > 1 ? 's' : ''}, 0 included`);
+          sendLog(`[MT] EP${epNum}: NOTE — ${numSubs} subtitle track(s) not included in multi-title build (subtitle support is single-title only)`);
         }
       } catch (_) {}
     }
 
+    // Determine FFmpeg -map args for audio
+    const audioMaps = epAudioTracks.length > 0
+      ? epAudioTracks.map(t => ['-map', `0:${t.trackIndex ?? t.streamIndex ?? 'a:0'}`]).flat()
+      : ['-map', '0:a:0'];
+
     // Step A: FFmpeg → main.ts
-    const ffArgs = ['-y', '-i', ep.path,
-      '-map', '0:v:0', '-map', '0:a:0',
+    const ffArgs = ['-y', '-i', ep.path, '-map', '0:v:0', ...audioMaps,
       ...(fastEncode
         ? ['-c:v', 'h264_videotoolbox', '-realtime', '0', '-profile:v', 'high',
            '-level', level, '-pix_fmt', 'yuv420p',
@@ -3406,13 +3536,22 @@ ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discNa
            '-maxrate', maxrateK, '-bufsize', bufsizeK]),
     ];
     sendLog(`[MT] EP${epNum}: ${fastEncode ? 'h264_videotoolbox (experimental fast encode)' : 'libx264 Blu-ray-safe CRF20'} L${level}`);
+    sendLog(`[MT] EP${epNum}: ${epAudioTracks.length || 1} audio track(s) mapped`);
     const needsScale = srcRes.w !== safeW || srcRes.h !== safeH;
     const vfParts = [];
     if (needsScale) vfParts.push(`scale=${safeW}:${safeH}:force_original_aspect_ratio=decrease,pad=${safeW}:${safeH}:(ow-iw)/2:(oh-ih)/2:black`);
     if (safeFps) vfParts.push(`fps=${safeFps}`);
     if (vfParts.length) ffArgs.push('-vf', vfParts.join(','));
-    ffArgs.push('-c:a', 'ac3', '-b:a', '640k',
-      '-f', 'mpegts', '-mpegts_flags', 'system_b', mainTs);
+
+    // Audio codec args: AC3 640k for each selected track
+    const numAudioTracks = epAudioTracks.length || 1;
+    for (let ai = 0; ai < numAudioTracks; ai++) {
+      ffArgs.push(`-c:a:${ai}`, 'ac3', `-b:a:${ai}`, '640k');
+      if (epAudioTracks[ai]?.language) {
+        ffArgs.push(`-metadata:s:a:${ai}`, `language=${langCode(epAudioTracks[ai].language)}`);
+      }
+    }
+    ffArgs.push('-f', 'mpegts', '-mpegts_flags', 'system_b', mainTs);
 
     const dur = getVideoDuration(ep.path);
     if (dur > 0) sendLog(`__CRF_START:${Math.round(dur)}`);
@@ -3442,16 +3581,24 @@ ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discNa
     if (mkvResult) { cleanup(workDir); return { error: mkvResult }; }
     sendLog(`[MT] EP${epNum}: main_bd.mkv ${(fs.statSync(mainBdMkv).size/1e6).toFixed(1)} MB`);
 
-    // Step C: write tsMuxeR meta
+    // Step C: write tsMuxeR meta — video (track=1) + all audio tracks
     const metaFile  = path.join(epDir, 'tsmuxer.meta');
     const metaLines = [
       'MUXOPT --blu-ray --new-audio-pes',
       `V_MPEG4/ISO/AVC, "${tsPath(mainBdMkv)}", fps=${fpsToTsMuxer(safeFps)}, insertSEI, contSPS, track=1`,
-      `A_AC3, "${tsPath(mainBdMkv)}", lang=und, track=2, default`,
     ];
+    if (epAudioTracks.length > 0) {
+      epAudioTracks.forEach((t, ai) => {
+        const lang = langCode(t.language || 'und');
+        const isDefault = ai === 0 ? ', default' : '';
+        metaLines.push(`A_AC3, "${tsPath(mainBdMkv)}", lang=${lang}, track=${ai + 2}${isDefault}`);
+      });
+    } else {
+      metaLines.push(`A_AC3, "${tsPath(mainBdMkv)}", lang=und, track=2, default`);
+    }
     fs.writeFileSync(metaFile, metaLines.join('\n') + '\n');
     try { fs.writeFileSync(require('os').homedir() + '/Desktop/last_mt_episode.meta', metaLines.join('\n') + '\n'); } catch {}
-    sendLog(`[MT] EP${epNum} meta:\n${metaLines.map(l => '  ' + l).join('\n')}`);
+    sendLog(`[MT] EP${epNum} meta (${epAudioTracks.length || 1} audio tracks):\n${metaLines.map(l => '  ' + l).join('\n')}`);
 
     // Step D: run tsMuxeR
     progress(i * 4 + 2, `Episode ${epNum}/${episodes.length}: tsMuxeR`);
@@ -3636,6 +3783,10 @@ ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discNa
     return { error: `Disc validation failed:\n\n${errors.map(e => '  • ' + e).join('\n')}` };
   }
   sendLog('[MT] All validation checks passed');
+
+  // ── Step 4b: Unlock FF/RW ──────────────────────────────────────────────────
+  progress(episodes.length * 4 + 2, 'Unlocking FF/RW (patching MPLS trick-play flags)');
+  patchMplsForTrickPlay(bdFolder);
 
   // ── Step 5: Create ISO ──────────────────────────────────────────────────────
   progress(episodes.length * 4 + 3, 'Packaging ISO');
