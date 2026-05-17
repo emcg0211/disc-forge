@@ -2687,8 +2687,8 @@ function validateHwBuild(project, workDir, bdFolder) {
 // ── FF/RW Unlock: Patch MPLS UO masks + random_access_flag ───────────────────
 // BD spec: UO_mask_flags in each PlayItem has 1=prohibited bits.
 // tsMuxeR sets byte 0 = 0x3E (prohibits fast-forward, rewind, slow, pause, still)
-// and random_access_flag = 0.  Clearing all UO bits + setting RAF=1 makes
-// libbluray set PSR4 = 0xFFFF (all user operations permitted), enabling FF/RW.
+// and random_access_flag = 0.  Clearing all UO bits + setting RAF=1 enables
+// FF/RW and trick-play on compliant players.
 //
 // Applied to BDMV/PLAYLIST/*.mpls and BDMV/BACKUP/*.mpls (tsMuxeR's backup copies
 // land directly in BACKUP/, not BACKUP/PLAYLIST/).
@@ -2732,14 +2732,14 @@ function patchMplsForTrickPlay(bdFolder) {
         const itemLen = data.readUInt16BE(itemPos);
         const itemDataStart = itemPos + 2;
 
-        // Clear all 8 UO_mask_flags bytes (offset +19 from item data start)
-        const uoOffset = itemDataStart + 19;
+        // Clear all 8 UO_mask_flags bytes (offset +20 from item data start)
+        const uoOffset = itemDataStart + 20;
         for (let j = 0; j < 8; j++) {
           if (data[uoOffset + j] !== 0) { data[uoOffset + j] = 0; modified = true; }
         }
 
-        // Set random_access_flag = 1 (offset +27 from item data start)
-        const rafOffset = itemDataStart + 27;
+        // Set random_access_flag = 1 (offset +28 from item data start)
+        const rafOffset = itemDataStart + 28;
         if (data[rafOffset] !== 0x01) { data[rafOffset] = 0x01; modified = true; }
 
         itemPos += itemLen + 2;
