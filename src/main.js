@@ -1113,7 +1113,10 @@ function readClpiEndTime(clpiPath) {
 //   1. Clone obj[2] and change its PlayPL target to N → new obj[3+i]
 //   2. Add a TitleSearchTable entry in index.bdmv pointing to the new object
 //
-// PlayPL opcode: 0x21810000 (w0), playlist-index (w1), 0 (w2) — verified empirically.
+// PLAY_PL opcode: 0x22800000 (w0), playlist-index (w1), 0 (w2).
+// tsMuxeR writes 0x21810000 for this command, which libbluray decodes as JUMP_TITLE (grp=BRANCH,
+// sub=JUMP, mnemonic=1). The correct PLAY_PL encoding is grp=BRANCH, sub=PLAY(2), mnemonic=0,
+// imm_op1=1 → big-endian bitstream: 001|00|010|1|0|00|0000|... = 0x22800000.
 // TitleInfo entry: 0x40 (HDMV movie), 0x00, ref_high, ref_low — 4 bytes, big-endian.
 // Index.bdmv: tsMuxeR pre-allocates 28 bytes (7 slots) after NumberOfTitles=0,
 //   so up to 7 additional titles fit without extending the file.
@@ -1168,7 +1171,8 @@ function fixMultiTitleNavigation(bdFolder, numAdditionalTitles) {
   for (let i = 0; i < numAdditionalTitles; i++) {
     const playlistId = i + 2;  // additional titles use playlists 2, 3, 4, …
     const newObj = Buffer.from(templateObjBytes);
-    newObj.writeUInt32BE(playlistId, lastCmdOff + 4);
+    newObj.writeUInt32BE(0x22800000, lastCmdOff);      // PLAY_PL opcode (replaces tsMuxeR's JUMP_TITLE)
+    newObj.writeUInt32BE(playlistId, lastCmdOff + 4);  // playlist ID
     newObjBufs.push(newObj);
     sendLog(`  fixMultiTitleNavigation: obj[${numObjs + i}] → PlayPL(${playlistId})`);
   }
@@ -3085,12 +3089,13 @@ function fixMultiTitleNavigationForEpisodes(bdFolder, numEpisodes, ep1TsMuxerPre
     return 1;
   };
 
-  // ── 1. MovieObject.bdmv: patch obj[2] to PlayPL(1), append N-1 new objects ──
-  // tsMuxeR generates obj[0] first-play, obj[1] chapter handler, obj[2] PlayPL(0).
-  // The merge step renames EP1's playlist 00000.mpls → 00001.mpls, so PlayPL(0)
-  // now points at nothing. Patch obj[2] to PlayPL(1) = EP1, then append N-1 new
-  // objects for EP2..EPN (PlayPL(2)..PlayPL(N)). tsMuxeR's existing Title 1 →
-  // obj[2] covers EP1; we only add entries for EP2..EPN.
+  // ── 1. MovieObject.bdmv: rewrite obj[2]'s last cmd to PLAY_PL(1), append N-1 new objects ──
+  // tsMuxeR generates obj[0] first-play, obj[1] chapter handler, obj[2] with a JUMP_TITLE(0)
+  // as its last command (raw bytes 0x21810000; libbluray sub=JUMP, mnemonic=JUMP_TITLE).
+  // The merge step renames EP1's playlist 00000.mpls → 00001.mpls.  We must replace that
+  // JUMP_TITLE with PLAY_PL(1) = EP1 (opcode 0x22800000, playlist-id in word[1]).
+  // Then append N-1 new objects for EP2..EPN with PLAY_PL(2)..PLAY_PL(N).
+  // tsMuxeR's existing Title 1 → obj[2] covers EP1; we only add entries for EP2..EPN.
   const mobjBuf = Buffer.from(fs.readFileSync(mobjPath));
   sendLog(`[MT] fixNav: MovieObject.bdmv before — ${mobjBuf.length} bytes:\n${dumpHex(mobjBuf)}`);
 
@@ -3126,9 +3131,11 @@ function fixMultiTitleNavigationForEpisodes(bdFolder, numEpisodes, ep1TsMuxerPre
     return;
   }
 
-  // Patch obj[2]: PlayPL(0) → PlayPL(1) because EP1's playlist was renamed during merge
-  mobjBuf.writeUInt32BE(1, obj2Pos + lastCmdOff + 4);
-  sendLog('[MT] fixNav: patched obj[2] PlayPL(0) → PlayPL(1) (EP1 mpls renamed during merge)');
+  // Replace obj[2]'s JUMP_TITLE(0) with PLAY_PL(1) (EP1's renamed playlist 00001.mpls)
+  mobjBuf.writeUInt32BE(0x22800000, obj2Pos + lastCmdOff);      // PLAY_PL opcode
+  mobjBuf.writeUInt32BE(1,          obj2Pos + lastCmdOff + 4);  // playlist ID = 1
+  mobjBuf.writeUInt32BE(0,          obj2Pos + lastCmdOff + 8);  // word[2] = 0
+  sendLog('[MT] fixNav: replaced obj[2] JUMP_TITLE(0)→PLAY_PL(1) (0x21810000→0x22800000, playlist 00001.mpls)');
   sendLog(`[MT] fixNav: obj[2] post-patch bytes ${obj2Pos}–${obj2Pos + templateObjBytes.length - 1}: ${mobjBuf.slice(obj2Pos, obj2Pos + templateObjBytes.length).toString('hex')}`);
 
   // Append N-1 new objects for EP2..EPN: PlayPL(2), PlayPL(3), ..., PlayPL(N)
@@ -3136,9 +3143,11 @@ function fixMultiTitleNavigationForEpisodes(bdFolder, numEpisodes, ep1TsMuxerPre
   for (let i = 0; i < N - 1; i++) {
     const playlistId = i + 2;  // EP2..EPN
     const newObj = Buffer.from(templateObjBytes);
-    newObj.writeUInt32BE(playlistId, lastCmdOff + 4);
+    newObj.writeUInt32BE(0x22800000, lastCmdOff);      // PLAY_PL opcode
+    newObj.writeUInt32BE(playlistId, lastCmdOff + 4);  // playlist ID
+    newObj.writeUInt32BE(0,          lastCmdOff + 8);  // word[2] = 0
     newObjBufs.push(newObj);
-    sendLog(`[MT] fixNav: mobj obj[${numObjs + i}] → PlayPL(${playlistId})`);
+    sendLog(`[MT] fixNav: mobj obj[${numObjs + i}] → PLAY_PL(${playlistId})`);
   }
 
   const totalNewObjBytes = newObjBufs.reduce((s, b) => s + b.length, 0);
