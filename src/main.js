@@ -2794,13 +2794,13 @@ async function addSplashToDisc(bdFolder, splashPngPath, workDir, duration = 5) {
 
   try {
     // Step 1: Encode splash PNG to 5-second TS.
-    // -framerate before -loop 1 and -bf 0 ensure BD-compliant H.264 bitstream.
-    // tsMuxeR will produce wrong CLPI/MPLS timestamps regardless; those are patched below.
+    // Use integer fps=24 (not 24000/1001) — tsMuxeR 2.6.16-dev divides frame
+    // duration by the fractional denominator (1001), compressing all PTS into ~5ms.
     sendLog('[Splash] Encoding 5-second splash PNG → TS');
     await new Promise((resolve, reject) => {
       const ff = spawn(TOOLS.ffmpeg, [
         '-y',
-        '-framerate', '24000/1001',
+        '-framerate', '24',
         '-loop', '1', '-i', splashPngPath,
         '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000',
         '-c:v', 'libx264', '-profile:v', 'high', '-level', '4.1',
@@ -2808,7 +2808,7 @@ async function addSplashToDisc(bdFolder, splashPngPath, workDir, duration = 5) {
         '-maxrate', '25000k', '-bufsize', '30000k',
         '-bf', '0', '-g', '24', '-keyint_min', '24', '-sc_threshold', '0',
         '-c:a', 'ac3', '-b:a', '192k', '-ac', '2',
-        '-t', String(duration), '-shortest', '-f', 'mpegts', splashTs,
+        '-t', String(duration), '-f', 'mpegts', splashTs,
       ]);
       let stderr = '';
       ff.stderr.on('data', d => { stderr += d.toString(); });
@@ -2841,7 +2841,7 @@ async function addSplashToDisc(bdFolder, splashPngPath, workDir, duration = 5) {
     const splashMeta = path.join(workDir, 'splash.meta');
     fs.writeFileSync(splashMeta, [
       'MUXOPT --blu-ray --new-audio-pes',
-      `V_MPEG4/ISO/AVC, "${tsPath(splashMkv)}", fps=24000/1001, insertSEI, contSPS, track=1`,
+      `V_MPEG4/ISO/AVC, "${tsPath(splashMkv)}", fps=24, insertSEI, contSPS, track=1`,
       `A_AC3, "${tsPath(splashMkv)}", lang=und, track=2, default`,
     ].join('\n') + '\n');
     fs.mkdirSync(splashBd, { recursive: true });
