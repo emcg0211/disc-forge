@@ -58,7 +58,7 @@ let state = {
   probeCache: {},    // filePath → { duration, videoBitrate, audioStreams }
   project: {
     title: '', description: '', discLabel: '',
-    resolution: RESOLUTIONS[0], videoFormat: VIDEO_FMTS[0], outputDir: '',
+    resolution: RESOLUTIONS[0], videoFormat: VIDEO_FMTS[0], outputDir: '', useSplash: false,
     mainVideo: null,
     titles: [],   // additional video titles on the disc
     discSize: 'BD-25',
@@ -1129,6 +1129,12 @@ function pageProject(p) {
             <label class="field-label">Video Codec</label>
             <select id="proj-vcodec">${VIDEO_FMTS.map(r=>`<option ${p.videoFormat===r?'selected':''}>${r}</option>`).join('')}</select>
           </div>
+        </div>
+        <div style="margin-top:12px">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--text-secondary)">
+            <input type="checkbox" id="use-splash" ${p.useSplash ? 'checked' : ''} style="width:14px;height:14px">
+            Add 5-second splash screen before playback (uses disc menu background)
+          </label>
         </div>
       </div>
     </div>
@@ -2222,6 +2228,7 @@ async function loadProject() {
       subtitleTracks: proj.subtitleTracks || [],
       chapters: proj.chapters || [],
       extras: proj.extras || [],
+      useSplash: proj.useSplash || false,
       menuConfig: { ...state.project.menuConfig, ...(proj.menuConfig || {}) },
     });
   } catch(e) {
@@ -2261,6 +2268,7 @@ function attachListeners() {
   document.getElementById('proj-res')?.addEventListener('change',   e => setPrj({ resolution: e.target.value }));
   document.getElementById('force-transcode')?.addEventListener('change', e => setPrj({ forceTranscode: e.target.checked }));
   document.getElementById('proj-vcodec')?.addEventListener('change',e => setPrj({ videoFormat: e.target.value }));
+  document.getElementById('use-splash')?.addEventListener('change',  e => setPrj({ useSplash: e.target.checked }));
   document.getElementById('pick-main-video')?.addEventListener('click', pickMainVideo);
 
   // MKV
