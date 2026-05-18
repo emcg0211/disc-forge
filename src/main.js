@@ -1081,8 +1081,8 @@ function readClpiEndTime(clpiPath) {
   try {
     const buf = fs.readFileSync(clpiPath);
     if (buf.length < 32) return null;
-    // Header offset 8: SequenceInfoStartAddress (4 bytes, big-endian)
-    const seqOff = buf.readUInt32BE(8);
+    // Header offset 12: SequenceInfoStartAddress (4 bytes, big-endian)
+    const seqOff = buf.readUInt32BE(12);
     // SequenceInfo layout at seqOff:
     //   +0  length (4)
     //   +4  reserved (1)
@@ -1095,8 +1095,8 @@ function readClpiEndTime(clpiPath) {
     //   +16 STCSeq[0].spn_stc_start (4)
     //   +20 STCSeq[0].presentation_start_time (4)
     //   +24 STCSeq[0].presentation_end_time (4)
-    if (seqOff + 26 > buf.length) return null;
-    const endTime = buf.readUInt32BE(seqOff + 22);
+    if (seqOff + 28 > buf.length) return null;
+    const endTime = buf.readUInt32BE(seqOff + 24);
     if (endTime === 0 || endTime > 0x20000000) return null;
     return endTime;
   } catch (e) {
