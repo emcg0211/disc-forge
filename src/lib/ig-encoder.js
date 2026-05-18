@@ -331,7 +331,7 @@ function encodeICS(opts) {
   const vd5 = Buffer.alloc(5);
   vd5.writeUInt16BE(videoWidth,  0);
   vd5.writeUInt16BE(videoHeight, 2);
-  vd5[4] = (frameRate & 0x0F) << 4;  // high nibble = frame_rate, low nibble = reserved
+  vd5[4] = frameRate & 0xF0;  // high nibble = frame_rate code, low nibble = reserved
 
   // CompositionDescriptor: composition_number(16) composition_state(2) reserved(6)
   const cd = Buffer.alloc(3);
@@ -378,8 +378,8 @@ function buildNavCmd(type, arg = 0) {
       cmd.writeUInt32BE(0,          8);
       break;
     case 'JUMP_TITLE':
-      // JUMP_TITLE: 0x21010000, w1=titleId, w2=0
-      cmd.writeUInt32BE(0x21010000, 0);
+      // JUMP_TITLE with imm_op1=1 (0x21810000 matches tsMuxeR/libbluray)
+      cmd.writeUInt32BE(0x21810000, 0);
       cmd.writeUInt32BE(arg,        4);
       cmd.writeUInt32BE(0,          8);
       break;
