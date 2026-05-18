@@ -130,7 +130,7 @@ async function probeIsoMethod() {
     rmTmp();
     if (ok) {
       bestIsoMethod = 'xorriso-udf250';
-      console.log('[ISO] xorriso UDF 2.50: SUPPORTED');
+      sendLog('[ISO] xorriso UDF 2.50: SUPPORTED');
     } else {
       // UDF 2.50 failed — try xorriso native mode as fallback
       const tmpDir2 = path.join(os.tmpdir(), `discforge_isocheck2_${Date.now()}`);
@@ -144,16 +144,16 @@ async function probeIsoMethod() {
       try { if (fs.existsSync(tmpIso2)) fs.unlinkSync(tmpIso2); } catch(_) {}
       if (okNative) {
         bestIsoMethod = 'xorriso-native';
-        console.log('[ISO] xorriso native: SUPPORTED');
+        sendLog('[ISO] xorriso native: SUPPORTED');
       } else {
         bestIsoMethod = null;
-        console.log('[ISO] xorriso UDF 2.50: NOT AVAILABLE — install with: brew install xorriso');
+        sendLog('[ISO] xorriso UDF 2.50: NOT AVAILABLE — install with: brew install xorriso');
       }
     }
   } else {
     rmTmp();
     bestIsoMethod = null;
-    console.log('[ISO] xorriso UDF 2.50: NOT AVAILABLE — install with: brew install xorriso');
+    sendLog('[ISO] xorriso UDF 2.50: NOT AVAILABLE — install with: brew install xorriso');
   }
 }
 
@@ -702,6 +702,27 @@ ipcMain.handle('build-disc', async (_, project) => {
       patchMplsForTrickPlay(bdFolder);
       return Promise.resolve();
     } },
+    ...(project.useSplash ? [{
+      label: 'Adding splash screen',
+      fn: async () => {
+        const splashDuration = project.splashDuration || 5;
+        const splashColor    = project.splashColor    || '1a1a2e';
+        const menuBg   = path.join(workDir, 'menu_bg.png');
+        const splashPng = path.join(workDir, 'splash.png');
+        if (project.splashPngPath && fs.existsSync(project.splashPngPath)) {
+          fs.copyFileSync(project.splashPngPath, splashPng);
+        } else if (fs.existsSync(menuBg)) {
+          fs.copyFileSync(menuBg, splashPng);
+        } else {
+          await new Promise((resolve, reject) => {
+            const ff = spawn(TOOLS.ffmpeg, ['-y', '-f', 'lavfi', '-i', `color=c=0x${splashColor}:s=1920x1080:r=1`, '-vframes', '1', splashPng]);
+            ff.on('error', reject);
+            ff.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg PNG gen exit ${code}`)));
+          });
+        }
+        return addSplashToDisc(bdFolder, splashPng, workDir, splashDuration);
+      },
+    }] : []),
     { label: 'Packaging ISO image', fn: async () => {
       const _path = require('path'), _fs = require('fs');
       const bdmvContents = _fs.readdirSync(_path.join(bdFolder,'BDMV')).join(', ');
@@ -1077,33 +1098,6 @@ function muxExtras(project, workDir, tsDir) {
 // Last resort: if Step 3 also fails, copy the .ts as .m2ts (no subtitles).
 
 
-function readClpiEndTime(clpiPath) {
-  try {
-    const buf = fs.readFileSync(clpiPath);
-    if (buf.length < 32) return null;
-    // Header offset 12: SequenceInfoStartAddress (4 bytes, big-endian)
-    const seqOff = buf.readUInt32BE(12);
-    // SequenceInfo layout at seqOff:
-    //   +0  length (4)
-    //   +4  reserved (1)
-    //   +5  num_atc_sequences (1)
-    //   +6  ATCSeq[0].spn_atc_start (4)
-    //   +10 ATCSeq[0].num_stc_sequences (1)
-    //   +11 ATCSeq[0].offset_stc_id (1)
-    //   +12 ATCSeq[0].reserved (2)
-    //   +14 STCSeq[0].pcr_pid (2)
-    //   +16 STCSeq[0].spn_stc_start (4)
-    //   +20 STCSeq[0].presentation_start_time (4)
-    //   +24 STCSeq[0].presentation_end_time (4)
-    if (seqOff + 28 > buf.length) return null;
-    const endTime = buf.readUInt32BE(seqOff + 24);
-    if (endTime === 0 || endTime > 0x20000000) return null;
-    return endTime;
-  } catch (e) {
-    sendLog(`readClpiEndTime: ${e.message}`);
-    return null;
-  }
-}
 
 // After processAdditionalTitle completes for all extra titles, register them
 // in the disc navigation so hardware players can access them.
@@ -2141,16 +2135,6 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
   });
 }
 
-// ── BD-safe frame-rate validation ─────────────────────────────────────────────
-const BD_SAFE_FPS = [23.976, 24.000, 25.000, 29.970, 50.000, 59.940];
-const BD_FPS_TOL  = 0.05;
-function isBdSafeFps(fps) {
-  return BD_SAFE_FPS.some(safe => Math.abs(fps - safe) < BD_FPS_TOL);
-}
-
-function getNearestBdSafeFps(fps) {
-  return BD_SAFE_FPS.reduce((best, s) => Math.abs(fps - s) < Math.abs(fps - best) ? s : best);
-}
 
 // BD-valid Blu-ray resolution+FPS combinations (progressive only, no interlace):
 //   1920×1080: 23.976p, 24p  (BD-ROM spec table)
@@ -2787,181 +2771,208 @@ function patchMplsForTrickPlay(bdFolder) {
 // NOTE: If the disc already has a menu stub at 00000.m2ts, the splash replaces/
 // precedes it by modifying the object command sequence only.
 
-async function addSplashToDisc(bdFolder, splashPngPath, workDir) {
+async function addSplashToDisc(bdFolder, splashPngPath, workDir, duration = 5) {
   if (!fs.existsSync(splashPngPath)) {
     sendLog('[Splash] splashPngPath not found — skipping splash');
     return;
   }
 
-  const streamDir  = path.join(bdFolder, 'BDMV', 'STREAM');
-  const clipDir    = path.join(bdFolder, 'BDMV', 'CLIPINF');
-  const playDir    = path.join(bdFolder, 'BDMV', 'PLAYLIST');
-  const backDir    = path.join(bdFolder, 'BDMV', 'BACKUP');
-  const mobjPath   = path.join(bdFolder, 'BDMV', 'MovieObject.bdmv');
+  const streamDir = path.join(bdFolder, 'BDMV', 'STREAM');
+  const clipDir   = path.join(bdFolder, 'BDMV', 'CLIPINF');
+  const playDir   = path.join(bdFolder, 'BDMV', 'PLAYLIST');
+  const backDir   = path.join(bdFolder, 'BDMV', 'BACKUP');
+  const mobjPath  = path.join(bdFolder, 'BDMV', 'MovieObject.bdmv');
 
   if (!fs.existsSync(mobjPath)) {
     sendLog('[Splash] MovieObject.bdmv not found — skipping splash');
     return;
   }
 
-  // ── Step 1: Encode splash PNG to 5-second .ts ─────────────────────────────
   const splashTs  = path.join(workDir, 'splash.ts');
   const splashMkv = path.join(workDir, 'splash_bd.mkv');
   const splashBd  = path.join(workDir, 'splash_bd');
 
-  sendLog('[Splash] Encoding 5-second splash PNG → TS');
-  await new Promise((resolve, reject) => {
-    const ffArgs = ['-y', '-loop', '1', '-i', splashPngPath,
-      '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo',
-      '-c:v', 'libx264', '-preset', 'fast',
-      '-profile:v', 'high', '-level', '4.1',
-      '-pix_fmt', 'yuv420p', '-crf', '23',
-      '-maxrate', '25000k', '-bufsize', '30000k',
-      '-g', '24', '-keyint_min', '24', '-sc_threshold', '0',
-      '-c:a', 'ac3', '-b:a', '64k',
-      '-t', '5', '-f', 'mpegts', '-mpegts_flags', 'system_b', splashTs];
-    const ff = spawn(TOOLS.ffmpeg, ffArgs);
-    let stderr = '';
-    ff.stderr.on('data', d => { stderr += d.toString(); });
-    ff.on('close', code => {
-      if (code !== 0 || !fs.existsSync(splashTs)) {
-        sendLog(`[Splash] FFmpeg failed (${code}) — ${stderr.slice(-300)}`);
-        sendLog('[Splash] Skipping splash due to FFmpeg error');
-        resolve(false);
-      } else {
-        sendLog(`[Splash] Splash TS: ${(fs.statSync(splashTs).size/1e3).toFixed(0)} KB`);
-        resolve(true);
-      }
+  try {
+    // Step 1: Encode splash PNG to 5-second TS.
+    // Use integer fps=24 (not 24000/1001) — tsMuxeR 2.6.16-dev divides frame
+    // duration by the fractional denominator (1001), compressing all PTS into ~5ms.
+    sendLog('[Splash] Encoding 5-second splash PNG → TS');
+    await new Promise((resolve, reject) => {
+      const ff = spawn(TOOLS.ffmpeg, [
+        '-y',
+        '-framerate', '24',
+        '-loop', '1', '-i', splashPngPath,
+        '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000',
+        '-c:v', 'libx264', '-profile:v', 'high', '-level', '4.1',
+        '-pix_fmt', 'yuv420p', '-preset', 'fast', '-crf', '20',
+        '-maxrate', '25000k', '-bufsize', '30000k',
+        '-bf', '0', '-g', '24', '-keyint_min', '24', '-sc_threshold', '0',
+        '-c:a', 'ac3', '-b:a', '192k', '-ac', '2',
+        '-t', String(duration), '-f', 'mpegts', splashTs,
+      ]);
+      let stderr = '';
+      ff.stderr.on('data', d => { stderr += d.toString(); });
+      ff.on('error', reject);
+      ff.on('close', code => {
+        if (code !== 0 || !fs.existsSync(splashTs)) {
+          reject(new Error(`FFmpeg exit ${code}: ${stderr.slice(-300)}`));
+        } else {
+          sendLog(`[Splash] Splash TS: ${(fs.statSync(splashTs).size/1e3).toFixed(0)} KB`);
+          resolve();
+        }
+      });
     });
-    ff.on('error', err => { sendLog(`[Splash] FFmpeg error: ${err.message}`); resolve(false); });
-  }).then(async ok => {
-    if (!ok) return;
 
-    // ── Step 2: mkvmerge → .mkv ────────────────────────────────────────────
-    await new Promise((resolve2) => {
+    // Step 2: mkvmerge TS → MKV
+    await new Promise((resolve, reject) => {
       const mkv = spawn(TOOLS.mkvmerge, ['-o', splashMkv, splashTs]);
-      mkv.on('close', code2 => {
-        if ((code2 !== 0 && code2 !== 1) || !fs.existsSync(splashMkv)) {
-          sendLog('[Splash] mkvmerge failed — skipping splash'); resolve2(false);
-        } else { sendLog(`[Splash] Splash MKV: ${(fs.statSync(splashMkv).size/1e3).toFixed(0)} KB`); resolve2(true); }
-      });
-      mkv.on('error', err => { sendLog(`[Splash] mkvmerge error: ${err.message}`); resolve2(false); });
-    }).then(async ok2 => {
-      if (!ok2) return;
-
-      // ── Step 3: tsMuxeR → splash BDMV ─────────────────────────────────────
-      const splashMeta = path.join(workDir, 'splash.meta');
-      fs.writeFileSync(splashMeta, [
-        'MUXOPT --blu-ray --new-audio-pes',
-        `V_MPEG4/ISO/AVC, "${tsPath(splashMkv)}", fps=24000/1001, insertSEI, contSPS, track=1`,
-        `A_AC3, "${tsPath(splashMkv)}", lang=und, track=2, default`,
-      ].join('\n') + '\n');
-      fs.mkdirSync(splashBd, { recursive: true });
-      await new Promise((resolve3) => {
-        const ts = spawn(TOOLS.tsmuxer, [splashMeta, splashBd]);
-        ts.on('close', code3 => {
-          const splashStream = path.join(splashBd, 'BDMV', 'STREAM', '00000.m2ts');
-          if (code3 !== 0 || !fs.existsSync(splashStream) || fs.statSync(splashStream).size < 1000) {
-            sendLog('[Splash] tsMuxeR failed or empty output — skipping splash'); resolve3(false);
-          } else {
-            sendLog(`[Splash] Splash M2TS: ${(fs.statSync(splashStream).size/1e3).toFixed(0)} KB`);
-            resolve3(true);
-          }
-        });
-        ts.on('error', err => { sendLog(`[Splash] tsMuxeR error: ${err.message}`); resolve3(false); });
-      }).then(ok3 => {
-        if (!ok3) return;
-
-        // ── Step 4: Rename existing playlist 00000 → skip (splash takes 00000) ─
-        // In a tsMuxeR disc with menu: 00000=menu-stub, 00001=main-feature
-        // We replace the menu-stub stream/clip/playlist with our splash content.
-        const splashStream  = path.join(splashBd, 'BDMV', 'STREAM', '00000.m2ts');
-        const splashClpi    = path.join(splashBd, 'BDMV', 'CLIPINF', '00000.clpi');
-        const splashMpls    = path.join(splashBd, 'BDMV', 'PLAYLIST', '00000.mpls');
-        const splashBackup  = path.join(splashBd, 'BDMV', 'BACKUP');
-
-        // Copy splash files into disc BDMV
-        try {
-          fs.copyFileSync(splashStream, path.join(streamDir, '00000.m2ts'));
-          if (fs.existsSync(splashClpi)) {
-            fs.copyFileSync(splashClpi, path.join(clipDir, '00000.clpi'));
-            if (fs.existsSync(backDir)) fs.copyFileSync(splashClpi, path.join(backDir, '00000.clpi'));
-          }
-          if (fs.existsSync(splashMpls)) {
-            fs.copyFileSync(splashMpls, path.join(playDir, '00000.mpls'));
-            if (fs.existsSync(backDir)) {
-              const backMpls = path.join(backDir, 'PLAYLIST', '00000.mpls');
-              const backMplsDir = path.dirname(backMpls);
-              if (!fs.existsSync(backMplsDir)) fs.mkdirSync(backMplsDir, { recursive: true });
-              fs.copyFileSync(splashMpls, backMpls);
-              fs.copyFileSync(splashMpls, path.join(backDir, '00000.mpls'));
-            }
-          }
-          sendLog('[Splash] Splash BDMV files copied into disc structure');
-        } catch(e) {
-          sendLog(`[Splash] File copy error: ${e.message} — skipping navigation patch`);
-          return;
-        }
-
-        // ── Step 5: Patch MovieObject.bdmv Object[2] to PLAY_PL(0) then PLAY_PL(1) ──
-        // Object[2] is the main player: …PSR setup…, PLAY_PL(1)
-        // We insert PLAY_PL(0) as the second-to-last command.
-        try {
-          const mobj = Buffer.from(fs.readFileSync(mobjPath));
-          const MOBJ_STRUCT_OFF = 40;
-          const NUM_OBJS_OFF    = 48;
-          const mobjLength = mobj.readUInt32BE(MOBJ_STRUCT_OFF);
-          const numObjs    = mobj.readUInt16BE(NUM_OBJS_OFF);
-
-          // Find Object[2]
-          let pos2 = NUM_OBJS_OFF + 2;
-          let obj2Start = -1, obj2Size = 0;
-          for (let i2 = 0; i2 < numObjs; i2++) {
-            const nc = mobj.readUInt16BE(pos2 + 2);
-            if (i2 === 2) { obj2Start = pos2; obj2Size = 4 + nc * 12; }
-            pos2 += 4 + nc * 12;
-          }
-
-          if (obj2Start < 0) {
-            sendLog('[Splash] Object[2] not found — skipping navigation patch');
-            return;
-          }
-
-          // Insert PLAY_PL(0) (0x22800000 w1=0 w2=0) before the last command of Object[2]
-          const PLAY_PL_SPLASH = Buffer.alloc(12);
-          PLAY_PL_SPLASH.writeUInt32BE(0x22800000, 0);  // PLAY_PL opcode
-          PLAY_PL_SPLASH.writeUInt32BE(0x00000000, 4);  // playlist 0 (splash)
-          PLAY_PL_SPLASH.writeUInt32BE(0x00000000, 8);
-
-          // New Object[2] = original first (numCmds-1) commands + PLAY_PL(0) + last command
-          const origNumCmds = mobj.readUInt16BE(obj2Start + 2);
-          const obj2Body    = mobj.slice(obj2Start + 4, obj2Start + obj2Size);
-          const lastCmd     = obj2Body.slice((origNumCmds - 1) * 12);
-          const priorCmds   = obj2Body.slice(0, (origNumCmds - 1) * 12);
-          const newNumCmds  = origNumCmds + 1;
-          const newObj2     = Buffer.alloc(4 + newNumCmds * 12);
-          newObj2.writeUInt16BE(mobj.readUInt16BE(obj2Start), 0);     // flags
-          newObj2.writeUInt16BE(newNumCmds, 2);
-          priorCmds.copy(newObj2, 4);
-          PLAY_PL_SPLASH.copy(newObj2, 4 + (origNumCmds - 1) * 12);
-          lastCmd.copy(newObj2, 4 + origNumCmds * 12);
-
-          const before = mobj.slice(0, obj2Start);
-          const after  = mobj.slice(obj2Start + obj2Size);
-          const newMobj = Buffer.concat([before, newObj2, after]);
-          newMobj.writeUInt32BE(mobjLength + 12, MOBJ_STRUCT_OFF);    // updated length
-
-          fs.writeFileSync(mobjPath, newMobj);
-          if (fs.existsSync(backDir)) {
-            fs.copyFileSync(mobjPath, path.join(backDir, 'MovieObject.bdmv'));
-          }
-          sendLog(`[Splash] MovieObject.bdmv patched: Object[2] now has ${newNumCmds} cmds (splash→main)`);
-        } catch(e) {
-          sendLog(`[Splash] MovieObject patch error: ${e.message}`);
+      mkv.on('error', reject);
+      mkv.on('close', code => {
+        if ((code !== 0 && code !== 1) || !fs.existsSync(splashMkv)) {
+          reject(new Error(`mkvmerge exit ${code}`));
+        } else {
+          sendLog(`[Splash] Splash MKV: ${(fs.statSync(splashMkv).size/1e3).toFixed(0)} KB`);
+          resolve();
         }
       });
     });
-  });
+
+    // Step 3: tsMuxeR → splash BDMV
+    const splashMeta = path.join(workDir, 'splash.meta');
+    fs.writeFileSync(splashMeta, [
+      'MUXOPT --blu-ray --new-audio-pes',
+      `V_MPEG4/ISO/AVC, "${tsPath(splashMkv)}", fps=24, insertSEI, contSPS, track=1`,
+      `A_AC3, "${tsPath(splashMkv)}", lang=und, track=2, default`,
+    ].join('\n') + '\n');
+    fs.mkdirSync(splashBd, { recursive: true });
+
+    await new Promise((resolve, reject) => {
+      const ts = spawn(TOOLS.tsmuxer, [splashMeta, splashBd]);
+      ts.on('error', reject);
+      ts.on('close', code => {
+        const splashStream = path.join(splashBd, 'BDMV', 'STREAM', '00000.m2ts');
+        if (code !== 0 || !fs.existsSync(splashStream) || fs.statSync(splashStream).size < 50000) {
+          reject(new Error(`tsMuxeR exit ${code} or splash m2ts suspiciously small`));
+        } else {
+          sendLog(`[Splash] Splash M2TS: ${(fs.statSync(splashStream).size/1e3).toFixed(0)} KB`);
+          resolve();
+        }
+      });
+    });
+
+    // Patch tsMuxeR-generated splash MPLS + CLPI:
+    // tsMuxeR produces wrong out_time (~5ms) for short static-image content.
+    // CRITICAL: libbluray uses the CLPI presentation_end_time (not MPLS) to decide
+    // when to stop reading the m2ts. Both must be patched to the correct 5-second duration.
+    const splashMplsTemp = path.join(splashBd, 'BDMV', 'PLAYLIST', '00000.mpls');
+    const splashClpiTemp = path.join(splashBd, 'BDMV', 'CLIPINF', '00000.clpi');
+    if (fs.existsSync(splashMplsTemp)) {
+      const splashMplsBuf = fs.readFileSync(splashMplsTemp);
+      if (splashMplsBuf.length >= 0x5A) {
+        const inTime  = splashMplsBuf.readUInt32BE(0x52);
+        const outTime = inTime + Math.round(duration * 45000);
+        splashMplsBuf.writeUInt32BE(outTime, 0x56);
+        fs.writeFileSync(splashMplsTemp, splashMplsBuf);
+        sendLog(`[Splash] Patched MPLS out_time: in=${inTime}, out=${outTime}`);
+
+        // Patch CLPI presentation_end_time — same layout as MPLS but at different offsets.
+        // ClipInfoStartAddress is at CLPI byte 0x08; end_time is 22 bytes into ClipInfo content.
+        if (fs.existsSync(splashClpiTemp)) {
+          const clpiBuf       = Buffer.from(fs.readFileSync(splashClpiTemp));
+          const clipInfoAddr  = clpiBuf.readUInt32BE(0x08);
+          const endTimeOffset = clipInfoAddr + 22;
+          if (clpiBuf.length >= endTimeOffset + 4) {
+            clpiBuf.writeUInt32BE(outTime, endTimeOffset);
+            fs.writeFileSync(splashClpiTemp, clpiBuf);
+            sendLog(`[Splash] Patched CLPI presentation_end_time → ${outTime}`);
+          }
+        }
+      } else {
+        sendLog(`[Splash] WARNING: splash MPLS too small (${splashMplsBuf.length} bytes) to patch — skipping`);
+      }
+    }
+
+    // Step 4: Copy splash BDMV files into disc structure
+    const splashStream = path.join(splashBd, 'BDMV', 'STREAM', '00000.m2ts');
+    const splashClpi   = path.join(splashBd, 'BDMV', 'CLIPINF', '00000.clpi');
+    const splashMpls   = path.join(splashBd, 'BDMV', 'PLAYLIST', '00000.mpls');
+
+    fs.copyFileSync(splashStream, path.join(streamDir, '00000.m2ts'));
+    if (fs.existsSync(splashClpi)) {
+      fs.copyFileSync(splashClpi, path.join(clipDir, '00000.clpi'));
+      if (fs.existsSync(backDir)) fs.copyFileSync(splashClpi, path.join(backDir, '00000.clpi'));
+    }
+    if (fs.existsSync(splashMpls)) {
+      fs.copyFileSync(splashMpls, path.join(playDir, '00000.mpls'));
+      if (fs.existsSync(backDir)) {
+        const backMpls = path.join(backDir, 'PLAYLIST', '00000.mpls');
+        fs.mkdirSync(path.dirname(backMpls), { recursive: true });
+        fs.copyFileSync(splashMpls, backMpls);
+        fs.copyFileSync(splashMpls, path.join(backDir, '00000.mpls'));
+      }
+    }
+    sendLog('[Splash] Splash BDMV files copied into disc structure');
+
+    // Step 5: Guard + patch MovieObject.bdmv Object[2]
+    // Insert PLAY_PL(0) before the last command of Object[2].
+    // Guard: last command must be PLAY_PL (opcode 0x22800000) — if not, disc layout is
+    // unexpected and we must not blindly modify it.
+    const mobj = Buffer.from(fs.readFileSync(mobjPath));
+    const MOBJ_STRUCT_OFF = 40;
+    const NUM_OBJS_OFF    = 48;
+    const mobjLength = mobj.readUInt32BE(MOBJ_STRUCT_OFF);
+    const numObjs    = mobj.readUInt16BE(NUM_OBJS_OFF);
+
+    let pos2 = NUM_OBJS_OFF + 2;
+    let obj2Start = -1, obj2Size = 0;
+    for (let i2 = 0; i2 < numObjs; i2++) {
+      const nc = mobj.readUInt16BE(pos2 + 2);
+      if (i2 === 2) { obj2Start = pos2; obj2Size = 4 + nc * 12; }
+      pos2 += 4 + nc * 12;
+    }
+
+    if (obj2Start < 0) {
+      sendLog('[Splash] Object[2] not found — skipping navigation patch');
+      return;
+    }
+
+    const origNumCmds   = mobj.readUInt16BE(obj2Start + 2);
+    const obj2Body      = mobj.slice(obj2Start + 4, obj2Start + obj2Size);
+    const lastCmdOpcode = obj2Body.readUInt32BE((origNumCmds - 1) * 12);
+    if (lastCmdOpcode !== 0x22800000) {
+      sendLog(`[Splash] Object[2] last command opcode 0x${lastCmdOpcode.toString(16).padStart(8,'0')} is not PLAY_PL (0x22800000) — skipping navigation patch`);
+      return;
+    }
+
+    const PLAY_PL_SPLASH = Buffer.alloc(12);
+    PLAY_PL_SPLASH.writeUInt32BE(0x22800000, 0);
+    PLAY_PL_SPLASH.writeUInt32BE(0x00000000, 4);
+    PLAY_PL_SPLASH.writeUInt32BE(0x00000000, 8);
+
+    const newNumCmds = origNumCmds + 1;
+    const newObj2    = Buffer.alloc(4 + newNumCmds * 12);
+    newObj2.writeUInt16BE(mobj.readUInt16BE(obj2Start), 0);
+    newObj2.writeUInt16BE(newNumCmds, 2);
+    obj2Body.slice(0, (origNumCmds - 1) * 12).copy(newObj2, 4);
+    PLAY_PL_SPLASH.copy(newObj2, 4 + (origNumCmds - 1) * 12);
+    obj2Body.slice((origNumCmds - 1) * 12).copy(newObj2, 4 + origNumCmds * 12);
+
+    const newMobj = Buffer.concat([mobj.slice(0, obj2Start), newObj2, mobj.slice(obj2Start + obj2Size)]);
+    newMobj.writeUInt32BE(mobjLength + 12, MOBJ_STRUCT_OFF);
+
+    fs.writeFileSync(mobjPath, newMobj);
+    if (fs.existsSync(backDir)) {
+      fs.copyFileSync(mobjPath, path.join(backDir, 'MovieObject.bdmv'));
+    }
+    sendLog(`[Splash] MovieObject.bdmv patched: Object[2] now has ${newNumCmds} cmds (splash→main)`);
+
+  } catch (e) {
+    sendLog(`[Splash] Error: ${e.message} — splash skipped`);
+  } finally {
+    if (fs.existsSync(splashBd)) {
+      fs.rmSync(splashBd, { recursive: true, force: true });
+    }
+  }
 }
 
 // ── Step 7: Package ISO ────────────────────────────────────────────────────────
@@ -3532,7 +3543,7 @@ function fixMultiTitleNavigationForEpisodes(bdFolder, numEpisodes, ep1TsMuxerPre
 // Pipeline per episode: FFmpeg (libx264/AC3) → mkvmerge → tsMuxeR (--blu-ray)
 // Then merge all BDMV outputs and fix navigation.
 
-ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discName, fastEncode, resolution }) => {
+ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discName, fastEncode, resolution, useSplash, splashPngPath = null, splashDuration = 5, splashColor = '1a1a2e' }) => {
   if (!TOOLS.ffmpeg)   return { error: 'FFmpeg not found.\n\nInstall: brew install ffmpeg' };
   if (!TOOLS.tsmuxer)  return { error: 'tsMuxeR not found.\n\nInstall: brew install --cask tsmuxer' };
   if (!TOOLS.mkvmerge) return { error: 'mkvmerge not found.\n\nInstall: brew install mkvtoolnix' };
@@ -3990,6 +4001,26 @@ ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discNa
   // ── Step 4b: Unlock FF/RW ──────────────────────────────────────────────────
   progress(episodes.length * 4 + 2, 'Unlocking FF/RW (patching MPLS trick-play flags)');
   patchMplsForTrickPlay(bdFolder);
+
+  // ── Step 4c: Splash screen ─────────────────────────────────────────────────
+  if (useSplash) {
+    sendLog('[MT] Adding splash screen');
+    const menuBg    = path.join(workDir, 'menu_bg.png');
+    const splashPng = path.join(workDir, 'splash.png');
+    if (splashPngPath && fs.existsSync(splashPngPath)) {
+      fs.copyFileSync(splashPngPath, splashPng);
+    } else if (fs.existsSync(menuBg)) {
+      fs.copyFileSync(menuBg, splashPng);
+    } else {
+      await new Promise((resolve, reject) => {
+        const ff = spawn(TOOLS.ffmpeg, ['-y', '-f', 'lavfi', '-i', `color=c=0x${splashColor}:s=1920x1080:r=1`, '-vframes', '1', splashPng]);
+        ff.on('error', reject);
+        ff.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg PNG gen exit ${code}`)));
+      });
+    }
+    await addSplashToDisc(bdFolder, splashPng, workDir, splashDuration);
+    sendLog('[MT] Splash complete');
+  }
 
   // ── Step 5: Create ISO ──────────────────────────────────────────────────────
   progress(episodes.length * 4 + 3, 'Packaging ISO');
