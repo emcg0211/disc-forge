@@ -2890,6 +2890,22 @@ async function addSplashToDisc(bdFolder, splashPngPath, workDir) {
       });
     });
 
+    // Patch tsMuxeR-generated splash MPLS: it produces wrong out_time (~5ms)
+    // for short static-image content. Set out_time = in_time + 5 sec at 45kHz.
+    const splashMplsTemp = path.join(splashBd, 'BDMV', 'PLAYLIST', '00000.mpls');
+    if (fs.existsSync(splashMplsTemp)) {
+      const splashMplsBuf = fs.readFileSync(splashMplsTemp);
+      if (splashMplsBuf.length >= 0x5A) {
+        const inTime = splashMplsBuf.readUInt32BE(0x52);
+        const outTime = inTime + (5 * 45000);  // 5 sec × 45kHz
+        splashMplsBuf.writeUInt32BE(outTime, 0x56);
+        fs.writeFileSync(splashMplsTemp, splashMplsBuf);
+        sendLog(`[Splash] Patched MPLS out_time: in=${inTime}, out=${outTime} (5.000 sec duration)`);
+      } else {
+        sendLog(`[Splash] WARNING: splash MPLS too small (${splashMplsBuf.length} bytes) to patch — skipping`);
+      }
+    }
+
     // Step 4: Copy splash BDMV files into disc structure
     const splashStream = path.join(splashBd, 'BDMV', 'STREAM', '00000.m2ts');
     const splashClpi   = path.join(splashBd, 'BDMV', 'CLIPINF', '00000.clpi');
