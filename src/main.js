@@ -130,7 +130,7 @@ async function probeIsoMethod() {
     rmTmp();
     if (ok) {
       bestIsoMethod = 'xorriso-udf250';
-      console.log('[ISO] xorriso UDF 2.50: SUPPORTED');
+      sendLog('[ISO] xorriso UDF 2.50: SUPPORTED');
     } else {
       // UDF 2.50 failed — try xorriso native mode as fallback
       const tmpDir2 = path.join(os.tmpdir(), `discforge_isocheck2_${Date.now()}`);
@@ -144,16 +144,16 @@ async function probeIsoMethod() {
       try { if (fs.existsSync(tmpIso2)) fs.unlinkSync(tmpIso2); } catch(_) {}
       if (okNative) {
         bestIsoMethod = 'xorriso-native';
-        console.log('[ISO] xorriso native: SUPPORTED');
+        sendLog('[ISO] xorriso native: SUPPORTED');
       } else {
         bestIsoMethod = null;
-        console.log('[ISO] xorriso UDF 2.50: NOT AVAILABLE — install with: brew install xorriso');
+        sendLog('[ISO] xorriso UDF 2.50: NOT AVAILABLE — install with: brew install xorriso');
       }
     }
   } else {
     rmTmp();
     bestIsoMethod = null;
-    console.log('[ISO] xorriso UDF 2.50: NOT AVAILABLE — install with: brew install xorriso');
+    sendLog('[ISO] xorriso UDF 2.50: NOT AVAILABLE — install with: brew install xorriso');
   }
 }
 
@@ -1098,33 +1098,6 @@ function muxExtras(project, workDir, tsDir) {
 // Last resort: if Step 3 also fails, copy the .ts as .m2ts (no subtitles).
 
 
-function readClpiEndTime(clpiPath) {
-  try {
-    const buf = fs.readFileSync(clpiPath);
-    if (buf.length < 32) return null;
-    // Header offset 12: SequenceInfoStartAddress (4 bytes, big-endian)
-    const seqOff = buf.readUInt32BE(12);
-    // SequenceInfo layout at seqOff:
-    //   +0  length (4)
-    //   +4  reserved (1)
-    //   +5  num_atc_sequences (1)
-    //   +6  ATCSeq[0].spn_atc_start (4)
-    //   +10 ATCSeq[0].num_stc_sequences (1)
-    //   +11 ATCSeq[0].offset_stc_id (1)
-    //   +12 ATCSeq[0].reserved (2)
-    //   +14 STCSeq[0].pcr_pid (2)
-    //   +16 STCSeq[0].spn_stc_start (4)
-    //   +20 STCSeq[0].presentation_start_time (4)
-    //   +24 STCSeq[0].presentation_end_time (4)
-    if (seqOff + 28 > buf.length) return null;
-    const endTime = buf.readUInt32BE(seqOff + 24);
-    if (endTime === 0 || endTime > 0x20000000) return null;
-    return endTime;
-  } catch (e) {
-    sendLog(`readClpiEndTime: ${e.message}`);
-    return null;
-  }
-}
 
 // After processAdditionalTitle completes for all extra titles, register them
 // in the disc navigation so hardware players can access them.
@@ -2162,16 +2135,6 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
   });
 }
 
-// ── BD-safe frame-rate validation ─────────────────────────────────────────────
-const BD_SAFE_FPS = [23.976, 24.000, 25.000, 29.970, 50.000, 59.940];
-const BD_FPS_TOL  = 0.05;
-function isBdSafeFps(fps) {
-  return BD_SAFE_FPS.some(safe => Math.abs(fps - safe) < BD_FPS_TOL);
-}
-
-function getNearestBdSafeFps(fps) {
-  return BD_SAFE_FPS.reduce((best, s) => Math.abs(fps - s) < Math.abs(fps - best) ? s : best);
-}
 
 // BD-valid Blu-ray resolution+FPS combinations (progressive only, no interlace):
 //   1920×1080: 23.976p, 24p  (BD-ROM spec table)
