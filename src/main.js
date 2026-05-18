@@ -3541,7 +3541,7 @@ function fixMultiTitleNavigationForEpisodes(bdFolder, numEpisodes, ep1TsMuxerPre
 // Pipeline per episode: FFmpeg (libx264/AC3) → mkvmerge → tsMuxeR (--blu-ray)
 // Then merge all BDMV outputs and fix navigation.
 
-ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discName, fastEncode, resolution }) => {
+ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discName, fastEncode, resolution, useSplash }) => {
   if (!TOOLS.ffmpeg)   return { error: 'FFmpeg not found.\n\nInstall: brew install ffmpeg' };
   if (!TOOLS.tsmuxer)  return { error: 'tsMuxeR not found.\n\nInstall: brew install --cask tsmuxer' };
   if (!TOOLS.mkvmerge) return { error: 'mkvmerge not found.\n\nInstall: brew install mkvtoolnix' };
@@ -3999,6 +3999,24 @@ ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discNa
   // ── Step 4b: Unlock FF/RW ──────────────────────────────────────────────────
   progress(episodes.length * 4 + 2, 'Unlocking FF/RW (patching MPLS trick-play flags)');
   patchMplsForTrickPlay(bdFolder);
+
+  // ── Step 4c: Splash screen ─────────────────────────────────────────────────
+  if (useSplash) {
+    sendLog('[MT] Adding splash screen');
+    const menuBg   = path.join(workDir, 'menu_bg.png');
+    const splashPng = path.join(workDir, 'splash.png');
+    if (fs.existsSync(menuBg)) {
+      fs.copyFileSync(menuBg, splashPng);
+    } else {
+      await new Promise((resolve, reject) => {
+        const ff = spawn(TOOLS.ffmpeg, ['-y', '-f', 'lavfi', '-i', 'color=c=0x1a1a2e:s=1920x1080:r=1', '-vframes', '1', splashPng]);
+        ff.on('error', reject);
+        ff.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg PNG gen exit ${code}`)));
+      });
+    }
+    await addSplashToDisc(bdFolder, splashPng, workDir);
+    sendLog('[MT] Splash complete');
+  }
 
   // ── Step 5: Create ISO ──────────────────────────────────────────────────────
   progress(episodes.length * 4 + 3, 'Packaging ISO');

@@ -443,6 +443,7 @@ async function startBuild() {
       discName: p.title,
       fastEncode: false,
       resolution: p.resolution || '1080p (1920×1080)',
+      useSplash: p.useSplash || false,
     });
   } else {
     appendLog(`[Renderer] Single-title routing → buildDisc`);
