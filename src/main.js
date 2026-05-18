@@ -2826,19 +2826,22 @@ async function addSplashToDisc(bdFolder, splashPngPath, workDir) {
   const splashBd  = path.join(workDir, 'splash_bd');
 
   try {
-    // Step 1: Encode splash PNG to 5-second TS
+    // Step 1: Encode splash PNG to 5-second TS.
+    // -framerate before -loop 1 and -bf 0 ensure BD-compliant H.264 bitstream.
+    // tsMuxeR will produce wrong CLPI/MPLS timestamps regardless; those are patched below.
     sendLog('[Splash] Encoding 5-second splash PNG → TS');
     await new Promise((resolve, reject) => {
       const ff = spawn(TOOLS.ffmpeg, [
-        '-y', '-loop', '1', '-i', splashPngPath,
-        '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo',
-        '-c:v', 'libx264', '-preset', 'fast',
-        '-profile:v', 'high', '-level', '4.1',
-        '-pix_fmt', 'yuv420p', '-crf', '23',
+        '-y',
+        '-framerate', '24000/1001',
+        '-loop', '1', '-i', splashPngPath,
+        '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000',
+        '-c:v', 'libx264', '-profile:v', 'high', '-level', '4.1',
+        '-pix_fmt', 'yuv420p', '-preset', 'fast', '-crf', '20',
         '-maxrate', '25000k', '-bufsize', '30000k',
-        '-g', '24', '-keyint_min', '24', '-sc_threshold', '0',
-        '-c:a', 'ac3', '-b:a', '64k',
-        '-t', '5', '-f', 'mpegts', '-mpegts_flags', 'system_b', splashTs,
+        '-bf', '0', '-g', '24', '-keyint_min', '24', '-sc_threshold', '0',
+        '-c:a', 'ac3', '-b:a', '192k', '-ac', '2',
+        '-t', '5', '-shortest', '-f', 'mpegts', splashTs,
       ]);
       let stderr = '';
       ff.stderr.on('data', d => { stderr += d.toString(); });
@@ -2881,8 +2884,8 @@ async function addSplashToDisc(bdFolder, splashPngPath, workDir) {
       ts.on('error', reject);
       ts.on('close', code => {
         const splashStream = path.join(splashBd, 'BDMV', 'STREAM', '00000.m2ts');
-        if (code !== 0 || !fs.existsSync(splashStream) || fs.statSync(splashStream).size < 1000) {
-          reject(new Error(`tsMuxeR exit ${code} or empty output`));
+        if (code !== 0 || !fs.existsSync(splashStream) || fs.statSync(splashStream).size < 50000) {
+          reject(new Error(`tsMuxeR exit ${code} or splash m2ts suspiciously small`));
         } else {
           sendLog(`[Splash] Splash M2TS: ${(fs.statSync(splashStream).size/1e3).toFixed(0)} KB`);
           resolve();
@@ -2890,17 +2893,33 @@ async function addSplashToDisc(bdFolder, splashPngPath, workDir) {
       });
     });
 
-    // Patch tsMuxeR-generated splash MPLS: it produces wrong out_time (~5ms)
-    // for short static-image content. Set out_time = in_time + 5 sec at 45kHz.
+    // Patch tsMuxeR-generated splash MPLS + CLPI:
+    // tsMuxeR produces wrong out_time (~5ms) for short static-image content.
+    // CRITICAL: libbluray uses the CLPI presentation_end_time (not MPLS) to decide
+    // when to stop reading the m2ts. Both must be patched to the correct 5-second duration.
     const splashMplsTemp = path.join(splashBd, 'BDMV', 'PLAYLIST', '00000.mpls');
+    const splashClpiTemp = path.join(splashBd, 'BDMV', 'CLIPINF', '00000.clpi');
     if (fs.existsSync(splashMplsTemp)) {
       const splashMplsBuf = fs.readFileSync(splashMplsTemp);
       if (splashMplsBuf.length >= 0x5A) {
-        const inTime = splashMplsBuf.readUInt32BE(0x52);
+        const inTime  = splashMplsBuf.readUInt32BE(0x52);
         const outTime = inTime + (5 * 45000);  // 5 sec × 45kHz
         splashMplsBuf.writeUInt32BE(outTime, 0x56);
         fs.writeFileSync(splashMplsTemp, splashMplsBuf);
-        sendLog(`[Splash] Patched MPLS out_time: in=${inTime}, out=${outTime} (5.000 sec duration)`);
+        sendLog(`[Splash] Patched MPLS out_time: in=${inTime}, out=${outTime}`);
+
+        // Patch CLPI presentation_end_time — same layout as MPLS but at different offsets.
+        // ClipInfoStartAddress is at CLPI byte 0x08; end_time is 22 bytes into ClipInfo content.
+        if (fs.existsSync(splashClpiTemp)) {
+          const clpiBuf       = Buffer.from(fs.readFileSync(splashClpiTemp));
+          const clipInfoAddr  = clpiBuf.readUInt32BE(0x08);
+          const endTimeOffset = clipInfoAddr + 22;
+          if (clpiBuf.length >= endTimeOffset + 4) {
+            clpiBuf.writeUInt32BE(outTime, endTimeOffset);
+            fs.writeFileSync(splashClpiTemp, clpiBuf);
+            sendLog(`[Splash] Patched CLPI presentation_end_time → ${outTime}`);
+          }
+        }
       } else {
         sendLog(`[Splash] WARNING: splash MPLS too small (${splashMplsBuf.length} bytes) to patch — skipping`);
       }
