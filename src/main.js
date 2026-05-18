@@ -3683,6 +3683,7 @@ ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discNa
     // If none supplied, probe the source and smart-select: prefer 5.1 > stereo > mono.
     // Tracks are referenced by their stream index in the source file.
     let epAudioTracks = (ep.audioTracks || []).filter(t => !t.excluded);
+    let autoSubStreams = []; // populated from ffprobe below
 
     if (TOOLS.ffprobe) {
       try {
@@ -3694,7 +3695,8 @@ ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discNa
         );
         const streams   = JSON.parse(probeOut).streams || [];
         const audioStreams = streams.filter(s => s.codec_type === 'audio');
-        const numSubs   = streams.filter(s => s.codec_type === 'subtitle').length;
+        const subStreams = streams.filter(s => s.codec_type === 'subtitle');
+        const numSubs   = subStreams.length;
 
         sendLog(`[MT] EP${epNum}: source has ${audioStreams.length} audio track(s), ${numSubs} subtitle(s)`);
         audioStreams.forEach((s, idx) => {
@@ -3724,7 +3726,14 @@ ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discNa
         }
 
         if (numSubs > 0) {
-          sendLog(`[MT] EP${epNum}: NOTE — ${numSubs} subtitle track(s) not included in multi-title build (subtitle support is single-title only)`);
+          sendLog(`[MT] EP${epNum}: found ${numSubs} subtitle stream(s) in source`);
+          autoSubStreams = subStreams.map(s => ({
+            streamIndex: s.index,
+            lang: langCode(s.tags?.language || 'und'),
+            codec: s.codec_name || '',
+            isForced: !!(s.disposition?.forced),
+            trackName: s.tags?.title || '',
+          }));
         }
       } catch (_) {}
     }
@@ -3783,10 +3792,123 @@ ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discNa
     if (ffResult) { cleanup(workDir); return { error: ffResult }; }
     sendLog(`[MT] EP${epNum}: main.ts ${(fs.statSync(mainTs).size/1e6).toFixed(1)} MB`);
 
-    // Step B: mkvmerge → main_bd.mkv
+    // ── Step A2: Extract / convert subtitle tracks to .sup ────────────────────
+    // Priority: explicit ep.subtitleTracks from UI > auto-detected embedded subs.
+    // PGS (hdmv_pgs_subtitle): extracted directly from source MKV via ffmpeg.
+    // Text (SRT/ASS/etc.): extracted to SRT then converted via tsMuxeR SRT→PGS
+    //   pass (same pattern as single-title Step 3a).  Failures are non-fatal —
+    //   a warning is logged and that track is skipped.
+    const epPgsSubs = []; // { extractedPath, lang, isForced, trackName }
+    const epExplicitSubs = (ep.subtitleTracks || []).filter(t => !t.excluded);
+    const subSources = epExplicitSubs.length > 0
+      ? epExplicitSubs.map(t => ({
+          sourceFile: t.file?.path || ep.path,
+          streamIndex: t.trackIndex ?? t.streamIndex ?? 0,
+          lang: langCode(t.language || 'und'),
+          codec: t.format === 'PGS (Blu-ray Native)' ? 'hdmv_pgs_subtitle' : 'text',
+          isForced: t.isForced || false,
+          trackName: t.description || '',
+        }))
+      : autoSubStreams;
+
+    if (subSources.length > 0) {
+      sendLog(`[MT] EP${epNum}: processing ${subSources.length} subtitle(s)`);
+      for (let si = 0; si < subSources.length; si++) {
+        const sub = subSources[si];
+        const isPGS = sub.codec === 'hdmv_pgs_subtitle' || sub.codec === 'pgssub';
+        const supFile = path.join(epTsDir, `sub_ep${epNum}_${si}.sup`);
+
+        if (isPGS) {
+          const srcExt = path.extname(sub.sourceFile).toLowerCase();
+          if (srcExt === '.sup') {
+            // Standalone .sup — use it directly; no extraction needed
+            sendLog(`[MT] EP${epNum}: using standalone .sup sub${si} (${sub.lang})`);
+            epPgsSubs.push({ extractedPath: sub.sourceFile, lang: sub.lang, isForced: sub.isForced, trackName: sub.trackName });
+          } else {
+            // Embedded PGS in a container (MKV, MKS, etc.) — extract via ffmpeg
+            const streamMap = sub.streamIndex != null ? `0:${sub.streamIndex}` : '0:s:0';
+            const pgsErr = await new Promise(resolve => {
+              const ff = spawn(TOOLS.ffmpeg, ['-y', '-i', sub.sourceFile, '-map', streamMap, '-c:s', 'copy', supFile]);
+              let err = '';
+              ff.stderr.on('data', d => { err += d.toString(); });
+              ff.on('close', code => resolve(code === 0 && fs.existsSync(supFile) && fs.statSync(supFile).size > 100 ? null : `extraction failed (exit ${code}): ${err.slice(-200)}`));
+              ff.on('error', e => resolve(e.message));
+            });
+            if (pgsErr) { sendLog(`[MT] EP${epNum}: WARNING — sub${si} PGS: ${pgsErr}`); continue; }
+            sendLog(`[MT] EP${epNum}: PGS sub${si} (${sub.lang}) → ${path.basename(supFile)}`);
+            epPgsSubs.push({ extractedPath: supFile, lang: sub.lang, isForced: sub.isForced, trackName: sub.trackName });
+          }
+        } else {
+          // Extract to SRT
+          const srtFile = path.join(epTsDir, `sub_ep${epNum}_${si}.srt`);
+          const srtErr = await new Promise(resolve => {
+            const ff = spawn(TOOLS.ffmpeg, ['-y', '-i', sub.sourceFile, '-map', `0:${sub.streamIndex}`, '-c:s', 'subrip', srtFile]);
+            let err = '';
+            ff.stderr.on('data', d => { err += d.toString(); });
+            ff.on('close', code => resolve(code === 0 && fs.existsSync(srtFile) && fs.statSync(srtFile).size > 50 ? null : `SRT extract failed (exit ${code}): ${err.slice(-200)}`));
+            ff.on('error', e => resolve(e.message));
+          });
+          if (srtErr) { sendLog(`[MT] EP${epNum}: WARNING — sub${si} text: ${srtErr} — skipping`); continue; }
+
+          // Convert SRT → PGS via tsMuxeR pass (uses mainTs as video reference for resolution/fps)
+          const srtMetaPath = path.join(epTsDir, `sub_ep${epNum}_${si}_srt.meta`);
+          const srtBdDir    = path.join(epTsDir, `sub_ep${epNum}_${si}_bd`);
+          fs.mkdirSync(srtBdDir, { recursive: true });
+          fs.writeFileSync(srtMetaPath, [
+            'MUXOPT --blu-ray --new-audio-pes',
+            `V_MPEG4/ISO/AVC, "${tsPath(mainTs)}", fps=${fpsToTsMuxer(safeFps)}, insertSEI, contSPS, track=1, video-width=${safeW}, video-height=${safeH}`,
+            `S_TEXT/UTF8, "${tsPath(srtFile)}", lang=${sub.lang}, video-width=${safeW}, video-height=${safeH}, fps=${fpsToTsMuxer(safeFps)}`,
+          ].join('\n') + '\n');
+
+          const srtTsErr = await new Promise(resolve => {
+            const ts = spawn(TOOLS.tsmuxer, [srtMetaPath, srtBdDir]);
+            ts.on('close', code => resolve(code === 0 ? null : `tsMuxeR SRT→PGS failed (exit ${code})`));
+            ts.on('error', e => resolve(e.message));
+          });
+          if (srtTsErr) { sendLog(`[MT] EP${epNum}: WARNING — sub${si} SRT→PGS: ${srtTsErr} — skipping`); continue; }
+
+          const srtStreamDir = path.join(srtBdDir, 'BDMV', 'STREAM');
+          const srtM2tsFiles = fs.existsSync(srtStreamDir) ? fs.readdirSync(srtStreamDir).filter(f => f.endsWith('.m2ts')) : [];
+          if (!srtM2tsFiles.length) { sendLog(`[MT] EP${epNum}: WARNING — sub${si} SRT→PGS: no m2ts in output — skipping`); continue; }
+          const srtM2ts = path.join(srtStreamDir, srtM2tsFiles[0]);
+
+          // Probe converted m2ts for subtitle stream index
+          let pgsPid = null;
+          if (TOOLS.ffprobe) {
+            try {
+              const { execFileSync } = require('child_process');
+              const pOut = execFileSync(TOOLS.ffprobe, ['-v', 'quiet', '-print_format', 'json', '-show_streams', srtM2ts], { encoding: 'utf8', timeout: 10000 });
+              const pSub = (JSON.parse(pOut).streams || []).find(s => s.codec_type === 'subtitle');
+              if (pSub) pgsPid = pSub.index;
+            } catch(_) {}
+          }
+          if (pgsPid === null) { sendLog(`[MT] EP${epNum}: WARNING — sub${si} SRT→PGS: no subtitle stream in converted m2ts — skipping`); continue; }
+
+          const pgsErr2 = await new Promise(resolve => {
+            const ff = spawn(TOOLS.ffmpeg, ['-y', '-i', srtM2ts, '-map', `0:${pgsPid}`, '-c:s', 'copy', supFile]);
+            let err = '';
+            ff.stderr.on('data', d => { err += d.toString(); });
+            ff.on('close', code => resolve(code === 0 && fs.existsSync(supFile) && fs.statSync(supFile).size > 100 ? null : `PGS extract from m2ts failed (exit ${code}): ${err.slice(-200)}`));
+            ff.on('error', e => resolve(e.message));
+          });
+          if (pgsErr2) { sendLog(`[MT] EP${epNum}: WARNING — sub${si} SRT PGS extract: ${pgsErr2}`); continue; }
+          sendLog(`[MT] EP${epNum}: SRT→PGS sub${si} (${sub.lang}) → ${path.basename(supFile)}`);
+          epPgsSubs.push({ extractedPath: supFile, lang: sub.lang, isForced: sub.isForced, trackName: sub.trackName });
+        }
+      }
+      sendLog(`[MT] EP${epNum}: ${epPgsSubs.length}/${subSources.length} subtitle(s) ready for mux`);
+    }
+
+    // Step B: mkvmerge → main_bd.mkv  (video+audio from main.ts + any .sup subtitle files)
     progress(i * 4 + 1, `Episode ${epNum}/${episodes.length}: mkvmerge`);
     const mkvResult = await new Promise(resolve => {
-      const mkv = spawn(TOOLS.mkvmerge, ['-o', mainBdMkv, mainTs]);
+      const mkvArgs = ['-o', mainBdMkv, mainTs];
+      epPgsSubs.forEach(sub => {
+        mkvArgs.push('--language', `0:${sub.lang}`);
+        if (sub.trackName) mkvArgs.push('--track-name', `0:${sub.trackName}`);
+        mkvArgs.push(sub.extractedPath);
+      });
+      const mkv = spawn(TOOLS.mkvmerge, mkvArgs);
       mkv.stdout.on('data', d => { const l = d.toString().trim(); if (l) sendLog(l); });
       mkv.stderr.on('data', d => { const l = d.toString().trim(); if (l) sendLog(l); });
       mkv.on('close', code => resolve((code === 0 || code === 1) && fs.existsSync(mainBdMkv) ? null : `EP${epNum} mkvmerge failed (${code})`));
@@ -3795,12 +3917,14 @@ ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discNa
     if (mkvResult) { cleanup(workDir); return { error: mkvResult }; }
     sendLog(`[MT] EP${epNum}: main_bd.mkv ${(fs.statSync(mainBdMkv).size/1e6).toFixed(1)} MB`);
 
-    // Step C: write tsMuxeR meta — video (track=1) + all audio tracks
+    // Step C: write tsMuxeR meta — video (track=1) + audio + subtitle tracks
+    // Track layout in combined MKV: 1=video, 2..N+1=audio, N+2..=PGS subtitle
     const metaFile  = path.join(epDir, 'tsmuxer.meta');
     const metaLines = [
       'MUXOPT --blu-ray --new-audio-pes',
       `V_MPEG4/ISO/AVC, "${tsPath(mainBdMkv)}", fps=${fpsToTsMuxer(safeFps)}, insertSEI, contSPS, track=1`,
     ];
+    const numEpAudio = epAudioTracks.length || 1;
     if (epAudioTracks.length > 0) {
       epAudioTracks.forEach((t, ai) => {
         const lang = langCode(t.language || 'und');
@@ -3810,9 +3934,14 @@ ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discNa
     } else {
       metaLines.push(`A_AC3, "${tsPath(mainBdMkv)}", lang=und, track=2, default`);
     }
+    let subTrackNum = numEpAudio + 2; // subtitle tracks follow audio in the MKV
+    epPgsSubs.forEach(sub => {
+      const forced = sub.isForced ? ', forced' : '';
+      metaLines.push(`S_HDMV/PGS, "${tsPath(mainBdMkv)}", lang=${sub.lang}, track=${subTrackNum++}${forced}`);
+    });
     fs.writeFileSync(metaFile, metaLines.join('\n') + '\n');
     try { fs.writeFileSync(require('os').homedir() + '/Desktop/last_mt_episode.meta', metaLines.join('\n') + '\n'); } catch {}
-    sendLog(`[MT] EP${epNum} meta (${epAudioTracks.length || 1} audio tracks):\n${metaLines.map(l => '  ' + l).join('\n')}`);
+    sendLog(`[MT] EP${epNum} meta (${numEpAudio} audio, ${epPgsSubs.length} subtitle):\n${metaLines.map(l => '  ' + l).join('\n')}`);
 
     // Step D: run tsMuxeR
     progress(i * 4 + 2, `Episode ${epNum}/${episodes.length}: tsMuxeR`);

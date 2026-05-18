@@ -425,6 +425,10 @@ async function startBuild() {
         const tp = t.file?.path;
         return !tp || tp === mainEpPath;
       }),
+      subtitleTracks: buildProject.subtitleTracks.filter(t => {
+        const tp = t.file?.path;
+        return !tp || tp === mainEpPath;
+      }),
     }] : []),
     ...((p.titles || []).map(t => {
       const ep = t.file?.path;
@@ -432,6 +436,7 @@ async function startBuild() {
       return {
         path: ep,
         audioTracks: buildProject.audioTracks.filter(at => at.file?.path === ep),
+        subtitleTracks: buildProject.subtitleTracks.filter(st => st.file?.path === ep),
       };
     }).filter(Boolean)),
   ];
