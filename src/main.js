@@ -2740,7 +2740,7 @@ function patchMplsForTrickPlay(bdFolder) {
 
         // Set random_access_flag = 1 (offset +28 from item data start)
         const rafOffset = itemDataStart + 28;
-        if (data[rafOffset] !== 0x01) { data[rafOffset] = 0x01; modified = true; }
+        if (!(data[rafOffset] & 0x80)) { data[rafOffset] |= 0x80; modified = true; }
 
         itemPos += itemLen + 2;
       }
