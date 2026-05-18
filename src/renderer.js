@@ -20,7 +20,7 @@ const LANGUAGES = ['English','French','Spanish','German','Italian','Portuguese',
 const AUDIO_FORMATS  = ['DTS-HD Master Audio','Dolby TrueHD','PCM 5.1','PCM 7.1','Dolby Digital 5.1','DTS 5.1','LPCM Stereo'];
 const SUBTITLE_FMTS  = ['SRT','ASS','SSA','SUB','VTT','PGS (Blu-ray Native)'];
 const VIDEO_FMTS     = ['H.264 AVC','H.265 HEVC','VC-1','MPEG-2'];
-const RESOLUTIONS    = ['1080p (1920×1080)','720p (1280×720)','480p (720×480)','480p (720×576) PAL','4K UHD (3840×2160) — for testing only, NOT BD-ROM spec, will not play on standard Blu-ray players'];
+const RESOLUTIONS    = ['1080p (1920×1080)','720p (1280×720)','480p (720×480) — may not play on all Blu-ray players, especially HD-only models','480p (720×576) PAL','4K UHD (3840×2160) — for testing only, NOT BD-ROM spec, will not play on standard Blu-ray players'];
 const MENU_THEMES    = ['Cinematic Dark','Elegant White','Retro Film','Minimal Type','Sci-Fi Grid','Organic Nature','Minimal','Cinema','Vintage','Neon','Grid','Sidebar'];
 const EXTRAS_TYPES   = ['Behind the Scenes','Deleted Scenes','Interviews','Trailers','Featurette','Short Film','Other'];
 
