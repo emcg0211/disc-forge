@@ -26,3 +26,4 @@ ts/
 # Editor
 .vscode/
 .idea/
+*.zip
