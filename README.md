@@ -1,138 +1,158 @@
-# 💿 Disc Forge
+# Disc Forge
 
-**Professional Blu-ray Authoring Studio for macOS**
+**Free, open-source macOS app that authors Blu-ray ISOs from MKV files.**
 
-Disc Forge turns your MKV files into fully-compliant Blu-ray ISOs — complete with animated menus, multiple audio tracks, PGS subtitles, and proper BD navigation structure. No Windows VM. No command line. No subscription.
+Disc Forge turns MKV files into fully-compliant BD-ROM ISOs with proper navigation, multi-title support, trick-play, and custom splash screens — no Windows VM, no command line, no subscription.
 
 > Built by one person, for people who care about their physical media collection.
 
-![Disc Forge Screenshot](docs/screenshot-main.png)
-
 ---
 
-## ✨ Features
+## Features
 
-- **Multi-episode discs** — build a full season box set on a single disc
-- **Multiple audio tracks** — preserve all dubs, commentary tracks, and language options
-- **PGS subtitle support** — converts ASS/SRT subtitles to proper Blu-ray PGS format
-- **Animated disc menus** — 12 built-in themes with full customization
-- **Video quality modes** — Passthrough (stream copy) or CRF re-encode (CRF 18/20/23) to fit more episodes per disc
-- **Direct BD-R burning** — burn to disc without a separate app
-- **Chapter markers** — auto-import from source MKV with thumbnail previews
-- **Passthrough mode** — zero re-encoding for BD-compatible sources
-- **Accurate disc size estimation** — estimates based on actual video bitrate, not source file size
-- **ISO output** — mount and play in IINA, VLC, or any software player
+**Verified working in v1.8.0 on LG BP350 hardware:**
+
+- **Multi-episode discs** — build a full season on a single disc; disc autoplays Episode 1, Title button cycles between episodes
+- **Trick-play (FF/RW)** — fast-forward and rewind work correctly on autoplayed titles
+- **Custom splash screen** — solid color or custom PNG, duration 3/5/8/10 seconds
+- **Multiple audio tracks** — preserves all dubs, commentary, and language options from source MKV
+- **Resolution enforcement** — honors your selected output resolution (1080p/720p/480p); BD-compliant validation at build time
+- **Stream copy / passthrough** — zero re-encoding for already-BD-compatible sources
+- **ISO output** — mount and play in VLC, IINA, or any BD-capable software player
 - **Light and dark mode**
 
----
-
-## 📋 Requirements
-
-- macOS 12 or later
-- Apple Silicon (M1/M2/M3/M4)
-- No additional installs required — all dependencies are bundled
+**Roadmap (not yet in a shipping release):**
+- Interactive Tier 2 menus with button-driven navigation
+- Complete subtitle pipeline (SRT/ASS/SUP/PGS conversion end-to-end)
+- Multi-disc projects (BD-50)
 
 ---
 
-## 📥 Installation
+## Requirements
 
-1. Download the latest `Disc Forge-x.x.x-arm64.dmg` from [Releases](https://github.com/emcg0211/disc-forge/releases)
-2. Open the DMG and drag Disc Forge to your Applications folder
-3. On first launch, macOS may show a security warning since the app is unsigned
+- macOS (Apple Silicon or Intel)
+- ffmpeg, mkvmerge, tsMuxeR, xorriso (see Building from Source)
+- ~5 GB free disk space for build temp files
 
-**To bypass the security warning, run this in Terminal:**
+---
+
+## Installation
+
+Download the latest `.dmg` from [Releases](https://github.com/emcg0211/disc-forge/releases).
+
+Since the app is unsigned, macOS may show a security warning on first launch. Run this once to clear it:
+
 ```bash
 xattr -cr "/Applications/Disc Forge.app"
 ```
-Then launch the app normally.
+
+Then launch normally.
 
 ---
 
-## 🛠 Building from Source
+## Building from Source
 
 ### Prerequisites
 
 ```bash
-brew install node mkvtoolnix
+brew install node mkvtoolnix xorriso
+brew install --cask tsmuxer
 ```
 
-You'll also need:
+You also need:
 - [FFmpeg static build](https://evermeet.cx/ffmpeg/) — place `ffmpeg` and `ffprobe` in `bin/`
-- [tsMuxeR](https://github.com/justdan96/tsMuxeR/releases) — place `tsMuxeR` in `bin/`
-- Python 3 + pysubs2: `pip3 install pysubs2`
+- `tsMuxeR` binary in `bin/` (from tsMuxeR releases or Homebrew cask)
 
-### Build
+### Run in development
 
 ```bash
 git clone https://github.com/emcg0211/disc-forge.git
 cd disc-forge
 npm install
-npm start          # run in development
-npm run build      # build DMG for distribution
+npm start
+```
+
+### Build a distributable .app
+
+```bash
+./BUILD_FOR_DISTRIBUTION.sh
+# or: npm run build
 ```
 
 ---
 
-## 🎬 How It Works
+## Usage — Single Title
 
-Disc Forge runs a multi-step pipeline under the hood:
-
-1. **FFmpeg** — transcodes FLAC/LPCM audio to AC3, extracts subtitle streams
-2. **pysubs2** — converts ASS/SSA subtitles to SRT format
-3. **tsMuxeR** — converts SRT → PGS Blu-ray subtitles
-4. **FFmpeg** — extracts PGS streams as `.sup` files
-5. **mkvmerge** — combines video + audio + subtitles into a clean MKV
-6. **tsMuxeR** — muxes the final BD structure (BDMV, CLIPINF, PLAYLIST)
-7. **hdiutil** — packages everything into a UDF/ISO 9660 hybrid `.iso`
+1. Open Disc Forge
+2. Drop an MKV file into "Main feature"
+3. Set title, resolution, and codec
+4. Click **Build Blu-ray ISO**
+5. Mount the resulting ISO in VLC or burn to BD-R
 
 ---
 
-## 📊 Video Quality Modes
+## Usage — Multi-Episode Disc
 
-| Mode | Method | Size | Quality |
-|------|--------|------|---------|
-| Passthrough | Stream copy | 100% | Lossless |
-| High Quality | CRF 18 | ~75% | Visually lossless |
-| Balanced | CRF 20 | ~55% | Excellent |
-| Compact | CRF 23 | ~40% | Good |
-
-At CRF 20, a typical 24-minute episode shrinks from ~3.5 GB to ~900 MB — fitting a full 26-episode season on a single BD-50.
+1. Switch to multi-title mode in the UI
+2. Add 2+ MKV files as episodes
+3. (Optional) Enable splash screen — choose PNG or color + duration
+4. Click **Build Blu-ray ISO**
+5. Disc autoplays Episode 1; the **Title** button on the remote cycles between episodes
 
 ---
 
-## 🎨 Menu Themes
+## Known Limitations
 
-Classic Dark · Elegant White · Retro Film · Minimal Type · Sci-Fi Grid · Organic Nature · Minimal · Cinema · Vintage · Neon · Grid · Sidebar
-
-Full customization including gradient backgrounds, text shadows, animated effects, font controls, and a real-time live preview.
+- Trick-play on Title 2+ depends on player firmware; tested on LG BP350
+- Subtitle pipeline is partially wired; for embedded PGS in source MKV it works; SRT/ASS conversion is not yet end-to-end
+- Interactive menus are in development (IG encoder foundation complete with 59 passing tests, not yet wired into builds)
+- No animated disc menus yet
+- Apple Silicon binary only in the pre-built DMG; Intel users must build from source
 
 ---
 
-## 📝 Version History
+## Architecture
+
+Disc Forge is an Electron + Node.js app. The build pipeline:
+
+1. **FFmpeg** — transcodes audio (FLAC/LPCM → AC3) and optionally re-encodes video at target CRF
+2. **mkvmerge** — assembles video + audio + subtitle streams into a clean MKV container
+3. **tsMuxeR** — muxes the MKV into BDAV-format `.m2ts` files and generates initial BDMV structure (CLIPINF, PLAYLIST, MovieObject, index.bdmv)
+4. **Custom patching** — post-processes MPLS/CLPI/MovieObject binary data to wire correct navigation, trick-play flags, and splash screen integration
+5. **xorriso / hdiutil** — packages the BDMV folder into a UDF 2.50 ISO
+
+The renderer layer is vanilla JS + HTML in `src/renderer.js`; all build orchestration lives in `src/main.js`.
+
+---
+
+## Verification
+
+The investigation harness at `tools/disc_forge_harness.py` provides end-to-end disc verification. Run it against a built ISO to confirm splash, navigation, and stream structure are correct.
+
+---
+
+## Version History
 
 See [CHANGELOG.md](CHANGELOG.md)
 
 ---
 
-## ☕ Support Development
-
-Disc Forge is free and open source. If it's useful to you, consider supporting development:
-
-- [Buy Me a Coffee](https://buymeacoffee.com/emcg0211)
-- [GitHub Sponsors](https://github.com/sponsors/emcg0211)
-
----
-
-## 📄 License
+## License
 
 Disc Forge is free for **personal, non-commercial use**. See [LICENSE](LICENSE) for full terms.
 
 ---
 
-## 🙏 Dependencies
+## Dependencies
 
 - [FFmpeg](https://ffmpeg.org/) — audio/video processing
 - [tsMuxeR](https://github.com/justdan96/tsMuxeR) — Blu-ray muxing
 - [mkvtoolnix](https://mkvtoolnix.download/) — MKV container tools
-- [pysubs2](https://github.com/tkarabela/pysubs2) — subtitle conversion
+- [xorriso](https://www.gnu.org/software/xorriso/) — ISO/UDF disc image creation
 - [Electron](https://www.electronjs.org/) — app framework
+
+---
+
+## Contributing
+
+Issues and pull requests welcome at [github.com/emcg0211/disc-forge](https://github.com/emcg0211/disc-forge).

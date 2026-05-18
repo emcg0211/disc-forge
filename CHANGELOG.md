@@ -1,5 +1,60 @@
 # Changelog
 
+## v1.8.0 — 2026-05-18
+
+**Splash screen support (hardware-verified)**
+
+- Custom splash screen: solid color or custom PNG, configurable duration (3/5/8/10 seconds)
+- Splash screen wired end-to-end: CLPI timestamp patch + MPLS out_time patch ensure splash plays for full selected duration
+- Fixed tsMuxeR 2.6.16-dev fps bug: use integer `fps=24` to avoid timestamp compression artifact that caused splash to play for ~5 ms instead of 5 s
+- Both CLPI and MPLS patched together (patching only one was insufficient)
+- UI: theme color picker, duration selector, custom PNG file picker
+- IG encoder foundation: 59 passing unit tests for BD-ROM Interactive Graphics stream encoding (not yet wired into builds)
+
+**Bug fixes**
+- Removed dead code and standardized internal logging (Phase 4 cleanup)
+- Fixed `readClpiEndTime` byte offsets
+- Fixed `patchMplsForTrickPlay`: random_access_flag is bit 7 (MSB), not bit 0
+- Fixed frame_rate mask and JUMP_TITLE opcode in ig-encoder
+
+---
+
+## v1.7.1 — 2026-05-17
+
+**Trick-play, multi-audio, resolution honor (LG BP350 verified)**
+
+- Trick-play (fast-forward / rewind) unlocked on autoplayed titles — `random_access_flag` and UO mask patched in MPLS
+- Multi-audio track support: all audio tracks from source MKV are preserved in the output disc
+- Resolution honor: selected output resolution (1080p/720p/480p) is correctly passed through the encode pipeline; BD-compliant validation at build time
+- Added 480p compatibility disclaimer in resolution dropdown
+
+---
+
+## v1.7.0 — 2026-05-17
+
+**Multi-title disc authoring (LG hardware verified)**
+
+- Multi-title mode: build 2+ episodes as separate BD titles on a single disc
+- Disc autoplays Episode 1; Title button on remote cycles between episodes
+- MovieObject and index.bdmv regenerated for N-title navigation
+- Fixed PLAY_PL opcode: replaced incorrect JUMP_TITLE (0x21810000) with correct PLAY_PL (0x22800000)
+- Fixed multi-title routing: renderer dispatches correct build path when 2+ episodes present
+- Fixed localStorage persistence and per-render sync for light/dark mode toggle
+
+---
+
+## v1.6.0 — 2026-05-16
+
+**First hardware-verified release — plays on consumer LG BD player**
+
+- BD-ROM navigation pipeline verified on LG BP350 hardware
+- FirstPlay/TopMenu point to correct obj[2] (bypasses tsMuxeR obj[0]/obj[1] which referenced stale playlist 0)
+- FirstPlay/TopMenu set to `playback_type=interactive` matching commercial BD discs
+- index.bdmv validator updated for 12-byte HDMV entry layout
+- Self-test on startup verifies ffmpeg, tsMuxeR, mkvmerge, xorriso availability
+
+---
+
 ## v1.5.2
 - Video Quality Mode — per-title quality selector: Passthrough, High Quality (CRF 18), Balanced (CRF 20), Compact (CRF 23)
 - CRF re-encode produces BD-compliant H.264 High Profile output
