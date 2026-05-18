@@ -135,23 +135,44 @@ function encodePDS({ paletteId = 0, version = 0, entries = [] }) {
  * @returns {Buffer} RLE-encoded pixel data
  */
 function encodeRLE(pixels, width, height) {
-  // TODO: implement proper BD-ROM RLE encoder
-  // Current stub produces trivially decodable (but large) output:
-  // each non-zero pixel as a literal, zeros as 1-pixel transparent runs.
-  // Real implementation should compress runs for efficiency.
-  const parts = [];
+  // BD-ROM RLE encoding (from libbluray rle.c):
+  //   CC (non-zero, non-0x00)                     = 1 pixel of color CC
+  //   0x00 0x01..0x3F                             = 1-63 transparent pixels
+  //   0x00 (0x40|(N>>8)) (N&0xFF)                 = 64-16383 transparent pixels
+  //   0x00 (0x80|N) CC                            = 1-63 pixels of color CC
+  //   0x00 (0xC0|(N>>8)) (N&0xFF) CC              = 64-16383 pixels of color CC
+  //   0x00 0x00                                   = end of line
+  const out = [];
+  const MAX_RUN = 0x3FFF;  // 16383 pixels max per run
+
   for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const px = pixels[y * width + x];
-      if (px === 0) {
-        parts.push(Buffer.from([0x00, 0x01]));  // 1 transparent pixel
-      } else {
-        parts.push(Buffer.from([px]));           // 1 pixel of color px
+    let x = 0;
+    while (x < width) {
+      const color = pixels[y * width + x];
+      // Measure run length
+      let runLen = 1;
+      while (x + runLen < width && runLen < MAX_RUN && pixels[y * width + x + runLen] === color) {
+        runLen++;
       }
+      if (color === 0) {
+        // Transparent run
+        if (runLen <= 0x3F) {
+          out.push(0x00, runLen);                        // 0x00 N (1-63)
+        } else {
+          out.push(0x00, 0x40 | (runLen >> 8), runLen & 0xFF);  // 0x00 (0x40|hi) lo
+        }
+      } else if (runLen === 1) {
+        out.push(color);                                 // single literal pixel
+      } else if (runLen <= 0x3F) {
+        out.push(0x00, 0x80 | runLen, color);           // 0x00 (0x80|N) CC
+      } else {
+        out.push(0x00, 0xC0 | (runLen >> 8), runLen & 0xFF, color);  // 0x00 (0xC0|hi) lo CC
+      }
+      x += runLen;
     }
-    parts.push(Buffer.from([0x00, 0x00]));       // end of line
+    out.push(0x00, 0x00);  // end of line
   }
-  return Buffer.concat(parts);
+  return Buffer.from(out);
 }
 
 // ── ODS Encoder ───────────────────────────────────────────────────────────────
@@ -272,6 +293,88 @@ function encodeWDS(windows) {
  *   }]
  * }
  */
+// ── ICS sub-encoders ─────────────────────────────────────────────────────────
+
+function encodeEffectSequence(effects = []) {
+  // Minimal effect_sequence: 0 windows, 0 effects (2 bytes)
+  // Full implementation would serialize animation windows and effects.
+  if (!effects || effects.length === 0) {
+    return Buffer.from([0x00, 0x00]);  // num_windows=0, num_effects=0
+  }
+  // For now only the empty case is needed to build a working display set.
+  return Buffer.from([0x00, 0x00]);
+}
+
+function encodeButton(btn) {
+  // Per button: id(2) numeric_select_value(2) auto_action(1) x(2) y(2)
+  //   upper(2) lower(2) left(2) right(2)
+  //   normal_start(2) normal_end(2) normal_repeat_and_flags(1)
+  //   sel_sound(1) sel_start(2) sel_end(2) sel_repeat_and_flags(1)
+  //   act_sound(1) act_start(2) act_end(2)
+  //   num_nav_cmds(2) [nav_cmds * 12]
+  const navCmds = btn.navCmds || [];
+  const fixedSize = 2+2+1+2+2+2+2+2+2+2+2+1+1+2+2+1+1+2+2+2;  // = 37 bytes
+  const buf = Buffer.alloc(fixedSize + navCmds.length * 12);
+  let o = 0;
+
+  buf.writeUInt16BE(btn.id                   || 0,  o); o += 2;
+  buf.writeUInt16BE(btn.numericSelectValue   || 0,  o); o += 2;
+  buf[o++] = btn.autoActionFlag ? 0x80 : 0x00;
+  buf.writeUInt16BE(btn.x                    || 0,  o); o += 2;
+  buf.writeUInt16BE(btn.y                    || 0,  o); o += 2;
+  buf.writeUInt16BE(btn.upperBtnId           ?? 0xFFFF, o); o += 2;
+  buf.writeUInt16BE(btn.lowerBtnId           ?? 0xFFFF, o); o += 2;
+  buf.writeUInt16BE(btn.leftBtnId            ?? 0xFFFF, o); o += 2;
+  buf.writeUInt16BE(btn.rightBtnId           ?? 0xFFFF, o); o += 2;
+  buf.writeUInt16BE(btn.normalStartObjId     || 0,  o); o += 2;
+  buf.writeUInt16BE(btn.normalEndObjId       || 0,  o); o += 2;
+  buf[o++] = btn.normalRepeat ? 0x80 : 0x00;
+  buf[o++] = btn.selectedSoundId             || 0;
+  buf.writeUInt16BE(btn.selStartObjId        || 0,  o); o += 2;
+  buf.writeUInt16BE(btn.selEndObjId          || 0,  o); o += 2;
+  buf[o++] = btn.selRepeat ? 0x80 : 0x00;
+  buf[o++] = btn.activatedSoundId            || 0;
+  buf.writeUInt16BE(btn.actStartObjId        || 0,  o); o += 2;
+  buf.writeUInt16BE(btn.actEndObjId          || 0,  o); o += 2;
+  buf.writeUInt16BE(navCmds.length,                 o); o += 2;
+  navCmds.forEach(cmd => { cmd.copy(buf, o); o += 12; });
+  return buf;
+}
+
+function encodeBOG(bog) {
+  // default_valid_button_id_ref(2) num_buttons(1) [buttons...]
+  const buttons = (bog.buttons || []).map(encodeButton);
+  const total = 3 + buttons.reduce((s, b) => s + b.length, 0);
+  const buf = Buffer.alloc(3);
+  buf.writeUInt16BE(bog.defaultValidButtonIdRef ?? (bog.buttons?.[0]?.id || 0), 0);
+  buf[2] = bog.buttons.length;
+  return Buffer.concat([buf, ...buttons]);
+}
+
+function encodePage(page) {
+  // page_id(1) page_version(1) uo_mask(8) in_effects out_effects
+  // animation_frame_rate_code(1) default_selected_btn(2) default_activated_btn(2)
+  // palette_id_ref(1) num_bogs(1) [bogs...]
+  const uoMask = page.uoMask || Buffer.alloc(8);
+  const inFx   = encodeEffectSequence(page.inEffects);
+  const outFx  = encodeEffectSequence(page.outEffects);
+  const bogs   = (page.bogs || []).map(encodeBOG);
+
+  const hdr = Buffer.alloc(2 + 8 + inFx.length + outFx.length + 1 + 2 + 2 + 1 + 1);
+  let o = 0;
+  hdr[o++] = page.id        || 0;
+  hdr[o++] = page.version   || 0;
+  uoMask.copy(hdr, o); o += 8;
+  inFx.copy(hdr, o);   o += inFx.length;
+  outFx.copy(hdr, o);  o += outFx.length;
+  hdr[o++] = page.animationFrameRateCode    || 0;
+  hdr.writeUInt16BE(page.defaultSelectedButtonIdRef  ?? (page.bogs?.[0]?.buttons?.[0]?.id || 0), o); o += 2;
+  hdr.writeUInt16BE(page.defaultActivatedButtonIdRef ?? 0xFFFF, o); o += 2;
+  hdr[o++] = page.paletteIdRef  || 0;
+  hdr[o++] = bogs.length;
+  return Buffer.concat([hdr, ...bogs]);
+}
+
 function encodeICS(opts) {
   const {
     videoWidth = 1920, videoHeight = 1080, frameRate = 0x40,
@@ -305,11 +408,9 @@ function encodeICS(opts) {
   utd[2] =  userTimeoutTicks        & 0xFF;
   icParts.push(utd);
 
-  // num_pages(8)
+  // num_pages(8) + each page
   icParts.push(Buffer.from([pages.length]));
-
-  // TODO: encode each page (see _decode_page in ig_decode.c for field order)
-  // pages.forEach(page => icParts.push(encodePage(page)));
+  pages.forEach(page => icParts.push(encodePage(page)));
 
   const icData = Buffer.concat(icParts);
 
@@ -408,10 +509,52 @@ function buildNavCmd(type, arg = 0) {
  * @param {number} pts         - presentation timestamp (90kHz)
  * @returns {Buffer} TS-packetized PES
  */
-function wrapInPES(segmentData, pid = 0x1200, pts = 0) {
-  // TODO: implement TS packetization
-  // Stub returns raw segment data (usable for unit testing segments without TS wrap)
-  return segmentData;
+function wrapInPES(segmentData, pid = 0x1200, pts = 0, startCC = 0) {
+  // Build PES packet:
+  //   0x000001 stream_id(1) PES_length(2) flags(2) hdr_data_len(1) PTS(5) data
+  const ptsBuf = encodePTS(pts);
+  const pesLength = 3 + ptsBuf.length + segmentData.length; // flags(2)+hdr_len(1)+pts(5)+data
+  const hdr = Buffer.alloc(9);
+  hdr[0] = 0x00; hdr[1] = 0x00; hdr[2] = 0x01;
+  hdr[3] = PES_STREAM_ID;
+  hdr.writeUInt16BE(Math.min(pesLength, 0xFFFF), 4);
+  hdr[6] = 0x80;  // marker=1
+  hdr[7] = 0x80;  // PTS only (PTS_DTS_flags=10)
+  hdr[8] = 0x05;  // PES_header_data_length = 5 bytes (PTS)
+  const pes = Buffer.concat([hdr, ptsBuf, segmentData]);
+
+  // Packetize into 188-byte TS packets
+  const packets = [];
+  let offset = 0;
+  let cc = startCC & 0x0F;
+
+  while (offset < pes.length) {
+    const pkt = Buffer.alloc(188, 0xFF);
+    pkt[0] = 0x47;
+    const pusi = (offset === 0) ? 0x40 : 0x00;
+    pkt[1] = pusi | ((pid >> 8) & 0x1F);
+    pkt[2] = pid & 0xFF;
+
+    const remaining = pes.length - offset;
+    const stuffing = 184 - Math.min(remaining, 184);
+
+    if (stuffing === 0) {
+      pkt[3] = 0x10 | cc;
+      pes.copy(pkt, 4, offset, offset + 184);
+      offset += 184;
+    } else {
+      // Adaptation field for stuffing
+      pkt[3] = 0x30 | cc;
+      pkt[4] = stuffing - 1;        // adaptation_field_length
+      if (stuffing >= 2) pkt[5] = 0x00;  // adaptation flags (no optional fields)
+      pkt.fill(0xFF, 6, 4 + stuffing);   // stuffing bytes
+      pes.copy(pkt, 4 + stuffing, offset, offset + remaining);
+      offset = pes.length;
+    }
+    packets.push(pkt);
+    cc = (cc + 1) & 0x0F;
+  }
+  return Buffer.concat(packets);
 }
 
 // ── Display Set Builder ───────────────────────────────────────────────────────
@@ -457,4 +600,8 @@ module.exports = {
   wrapInPES,
   buildSegment,
   encodePTS,
+  encodeEffectSequence,
+  encodePage,
+  encodeBOG,
+  encodeButton,
 };
