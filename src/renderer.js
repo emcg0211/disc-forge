@@ -59,6 +59,7 @@ let state = {
   project: {
     title: '', description: '', discLabel: '',
     resolution: RESOLUTIONS[0], videoFormat: VIDEO_FMTS[0], outputDir: '', useSplash: false,
+    splashPngPath: null, splashDuration: 5, splashColor: '1a1a2e',
     mainVideo: null,
     titles: [],   // additional video titles on the disc
     discSize: 'BD-25',
@@ -444,6 +445,9 @@ async function startBuild() {
       fastEncode: false,
       resolution: p.resolution || '1080p (1920×1080)',
       useSplash: p.useSplash || false,
+      splashPngPath: p.splashPngPath || null,
+      splashDuration: p.splashDuration || 5,
+      splashColor: p.splashColor || '1a1a2e',
     });
   } else {
     appendLog(`[Renderer] Single-title routing → buildDisc`);
@@ -1134,8 +1138,30 @@ function pageProject(p) {
         <div style="margin-top:12px">
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--text-secondary)">
             <input type="checkbox" id="use-splash" ${p.useSplash ? 'checked' : ''} style="width:14px;height:14px">
-            Add 5-second splash screen before playback (uses disc menu background)
+            Add splash screen before playback
           </label>
+          ${p.useSplash ? `
+          <div style="margin-top:8px;padding:10px 12px;background:var(--bg-secondary);border-radius:8px;display:flex;flex-direction:column;gap:10px">
+            <div style="display:flex;gap:10px;align-items:center">
+              <label style="font-size:12px;color:var(--text-secondary);min-width:52px">Duration</label>
+              <select id="splash-duration" style="font-size:12px;padding:3px 8px;border-radius:4px;border:1px solid var(--border);background:var(--bg-primary);color:var(--text-primary)">
+                ${[3,5,8,10].map(d=>`<option value="${d}"${(p.splashDuration||5)===d?' selected':''} >${d}s</option>`).join('')}
+              </select>
+              <label style="font-size:12px;color:var(--text-secondary);min-width:38px;margin-left:8px">Color</label>
+              <input type="color" id="splash-color" value="#${p.splashColor||'1a1a2e'}" style="width:36px;height:24px;cursor:pointer;border:none;border-radius:4px;padding:1px;background:none">
+              <span style="font-size:11px;color:var(--text-tertiary)">(fallback when no image)</span>
+            </div>
+            <div>
+              <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px">Custom image (optional)</label>
+              <div class="drop-zone compact ${p.splashPngPath?'has-file':''}" id="pick-splash-png" style="cursor:pointer">
+                <div class="dz-icon" style="width:28px;height:28px;font-size:14px">🖼</div>
+                <div class="dz-text">
+                  <div class="dz-label ${p.splashPngPath?'active':''}">${p.splashPngPath ? esc(p.splashPngPath.split('/').pop()) : 'Click to choose a PNG image'}</div>
+                  <div class="dz-hint">${p.splashPngPath ? '<button class="btn btn-ghost btn-xs" id="clear-splash-png">Remove</button>' : 'PNG · overrides color above'}</div>
+                </div>
+              </div>
+            </div>
+          </div>` : ''}
         </div>
       </div>
     </div>
@@ -2270,6 +2296,13 @@ function attachListeners() {
   document.getElementById('force-transcode')?.addEventListener('change', e => setPrj({ forceTranscode: e.target.checked }));
   document.getElementById('proj-vcodec')?.addEventListener('change',e => setPrj({ videoFormat: e.target.value }));
   document.getElementById('use-splash')?.addEventListener('change',  e => setPrj({ useSplash: e.target.checked }));
+  document.getElementById('splash-duration')?.addEventListener('change', e => setPrj({ splashDuration: parseInt(e.target.value, 10) }));
+  document.getElementById('splash-color')?.addEventListener('input',   e => setPrj({ splashColor: e.target.value.slice(1) }));
+  document.getElementById('pick-splash-png')?.addEventListener('click', async () => {
+    const r = await pickFile([{ name: 'Image', extensions: ['png'] }]);
+    if (r) setPrj({ splashPngPath: r });
+  });
+  document.getElementById('clear-splash-png')?.addEventListener('click', e => { e.stopPropagation(); setPrj({ splashPngPath: null }); });
   document.getElementById('pick-main-video')?.addEventListener('click', pickMainVideo);
 
   // MKV

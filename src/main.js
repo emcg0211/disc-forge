@@ -705,18 +705,22 @@ ipcMain.handle('build-disc', async (_, project) => {
     ...(project.useSplash ? [{
       label: 'Adding splash screen',
       fn: async () => {
+        const splashDuration = project.splashDuration || 5;
+        const splashColor    = project.splashColor    || '1a1a2e';
         const menuBg   = path.join(workDir, 'menu_bg.png');
         const splashPng = path.join(workDir, 'splash.png');
-        if (fs.existsSync(menuBg)) {
+        if (project.splashPngPath && fs.existsSync(project.splashPngPath)) {
+          fs.copyFileSync(project.splashPngPath, splashPng);
+        } else if (fs.existsSync(menuBg)) {
           fs.copyFileSync(menuBg, splashPng);
         } else {
           await new Promise((resolve, reject) => {
-            const ff = spawn(TOOLS.ffmpeg, ['-y', '-f', 'lavfi', '-i', 'color=c=0x1a1a2e:s=1920x1080:r=1', '-vframes', '1', splashPng]);
+            const ff = spawn(TOOLS.ffmpeg, ['-y', '-f', 'lavfi', '-i', `color=c=0x${splashColor}:s=1920x1080:r=1`, '-vframes', '1', splashPng]);
             ff.on('error', reject);
             ff.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg PNG gen exit ${code}`)));
           });
         }
-        return addSplashToDisc(bdFolder, splashPng, workDir);
+        return addSplashToDisc(bdFolder, splashPng, workDir, splashDuration);
       },
     }] : []),
     { label: 'Packaging ISO image', fn: async () => {
@@ -2804,7 +2808,7 @@ function patchMplsForTrickPlay(bdFolder) {
 // NOTE: If the disc already has a menu stub at 00000.m2ts, the splash replaces/
 // precedes it by modifying the object command sequence only.
 
-async function addSplashToDisc(bdFolder, splashPngPath, workDir) {
+async function addSplashToDisc(bdFolder, splashPngPath, workDir, duration = 5) {
   if (!fs.existsSync(splashPngPath)) {
     sendLog('[Splash] splashPngPath not found — skipping splash');
     return;
@@ -2841,7 +2845,7 @@ async function addSplashToDisc(bdFolder, splashPngPath, workDir) {
         '-maxrate', '25000k', '-bufsize', '30000k',
         '-bf', '0', '-g', '24', '-keyint_min', '24', '-sc_threshold', '0',
         '-c:a', 'ac3', '-b:a', '192k', '-ac', '2',
-        '-t', '5', '-shortest', '-f', 'mpegts', splashTs,
+        '-t', String(duration), '-shortest', '-f', 'mpegts', splashTs,
       ]);
       let stderr = '';
       ff.stderr.on('data', d => { stderr += d.toString(); });
@@ -2903,7 +2907,7 @@ async function addSplashToDisc(bdFolder, splashPngPath, workDir) {
       const splashMplsBuf = fs.readFileSync(splashMplsTemp);
       if (splashMplsBuf.length >= 0x5A) {
         const inTime  = splashMplsBuf.readUInt32BE(0x52);
-        const outTime = inTime + (5 * 45000);  // 5 sec × 45kHz
+        const outTime = inTime + Math.round(duration * 45000);
         splashMplsBuf.writeUInt32BE(outTime, 0x56);
         fs.writeFileSync(splashMplsTemp, splashMplsBuf);
         sendLog(`[Splash] Patched MPLS out_time: in=${inTime}, out=${outTime}`);
@@ -3576,7 +3580,7 @@ function fixMultiTitleNavigationForEpisodes(bdFolder, numEpisodes, ep1TsMuxerPre
 // Pipeline per episode: FFmpeg (libx264/AC3) → mkvmerge → tsMuxeR (--blu-ray)
 // Then merge all BDMV outputs and fix navigation.
 
-ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discName, fastEncode, resolution, useSplash }) => {
+ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discName, fastEncode, resolution, useSplash, splashPngPath = null, splashDuration = 5, splashColor = '1a1a2e' }) => {
   if (!TOOLS.ffmpeg)   return { error: 'FFmpeg not found.\n\nInstall: brew install ffmpeg' };
   if (!TOOLS.tsmuxer)  return { error: 'tsMuxeR not found.\n\nInstall: brew install --cask tsmuxer' };
   if (!TOOLS.mkvmerge) return { error: 'mkvmerge not found.\n\nInstall: brew install mkvtoolnix' };
@@ -4038,18 +4042,20 @@ ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discNa
   // ── Step 4c: Splash screen ─────────────────────────────────────────────────
   if (useSplash) {
     sendLog('[MT] Adding splash screen');
-    const menuBg   = path.join(workDir, 'menu_bg.png');
+    const menuBg    = path.join(workDir, 'menu_bg.png');
     const splashPng = path.join(workDir, 'splash.png');
-    if (fs.existsSync(menuBg)) {
+    if (splashPngPath && fs.existsSync(splashPngPath)) {
+      fs.copyFileSync(splashPngPath, splashPng);
+    } else if (fs.existsSync(menuBg)) {
       fs.copyFileSync(menuBg, splashPng);
     } else {
       await new Promise((resolve, reject) => {
-        const ff = spawn(TOOLS.ffmpeg, ['-y', '-f', 'lavfi', '-i', 'color=c=0x1a1a2e:s=1920x1080:r=1', '-vframes', '1', splashPng]);
+        const ff = spawn(TOOLS.ffmpeg, ['-y', '-f', 'lavfi', '-i', `color=c=0x${splashColor}:s=1920x1080:r=1`, '-vframes', '1', splashPng]);
         ff.on('error', reject);
         ff.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg PNG gen exit ${code}`)));
       });
     }
-    await addSplashToDisc(bdFolder, splashPng, workDir);
+    await addSplashToDisc(bdFolder, splashPng, workDir, splashDuration);
     sendLog('[MT] Splash complete');
   }
 
