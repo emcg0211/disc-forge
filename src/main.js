@@ -3039,6 +3039,142 @@ function packageISO(bdFolder, outputDir, discName) {
   });
 }
 
+// ── Phase 5: Tier 2 Interactive Menus ────────────────────────────────────────
+//
+// Adds a 2-button IG menu as Title 0 (playlist 00000) before the episode titles.
+// The menu is an ~5-second looping background video (solid color) with an IG
+// display set injected directly into the m2ts stream.
+//
+// BD-ROM IG stream injection approach:
+//   1. ffmpeg: solid-color PNG → TS (background video)
+//   2. mkvmerge: TS → MKV
+//   3. tsMuxeR: MKV → BD m2ts (video-only, proper 192-byte format)
+//   4. menu-builder: generate IG display set → 188-byte TS → 192-byte BD format
+//   5. Inject IG BD packets into video m2ts (after first 10 packets)
+//   6. Patch CLPI + MPLS to declare IG stream at PID 0x1200
+//   7. Update MovieObject to play menu first, then let button nav handle episodes
+//
+// Known limitation (2026-05-18): CLPI STN_table patching for IG streams is not
+// yet implemented. The menu m2ts is generated and valid, but libbluray will not
+// parse the IG stream until CLPI is patched. See patchClpiForIG in menu-builder.js.
+
+async function addMenuToDisc(bdFolder, menuConfig, workDir) {
+  const { buildMenuDisplaySet, convertTsBdFormat, injectIGIntoM2ts, IG_PID } = require('./lib/menu-builder');
+
+  const bgColor   = menuConfig.bgColor  || '1a1a2e';
+  const pl1       = menuConfig.pl1 ?? 0;
+  const pl2       = menuConfig.pl2 ?? 1;
+  const duration  = menuConfig.duration || 5;
+
+  const menuPng   = path.join(workDir, 'menu_bg.png');
+  const menuTs    = path.join(workDir, 'menu.ts');
+  const menuMkv   = path.join(workDir, 'menu_bd.mkv');
+  const menuBdDir = path.join(workDir, 'menu_bd');
+  const menuMeta  = path.join(workDir, 'menu.meta');
+  const streamDir = path.join(bdFolder, 'BDMV', 'STREAM');
+  const clipDir   = path.join(bdFolder, 'BDMV', 'CLIPINF');
+  const playDir   = path.join(bdFolder, 'BDMV', 'PLAYLIST');
+
+  if (!TOOLS.ffmpeg || !TOOLS.tsmuxer || !TOOLS.mkvmerge) {
+    sendLog('[Menu] Required tools missing (need ffmpeg, tsMuxeR, mkvmerge) — skipping menu');
+    return false;
+  }
+
+  try {
+    // Step 1: generate solid-color background PNG
+    sendLog(`[Menu] Generating background PNG (color #${bgColor})`);
+    await new Promise((resolve, reject) => {
+      const ff = spawn(TOOLS.ffmpeg, [
+        '-y', '-f', 'lavfi', '-i', `color=c=0x${bgColor}:s=1920x1080:r=1`,
+        '-vframes', '1', menuPng,
+      ]);
+      ff.on('close', code => code === 0 && fs.existsSync(menuPng) ? resolve() : reject(new Error(`Background PNG failed (exit ${code})`)));
+      ff.on('error', reject);
+    });
+
+    // Step 2: encode background video to MPEG-TS
+    sendLog(`[Menu] Encoding background video (${duration}s)`);
+    await new Promise((resolve, reject) => {
+      const ff = spawn(TOOLS.ffmpeg, [
+        '-y', '-framerate', '24', '-loop', '1', '-i', menuPng,
+        '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000',
+        '-c:v', 'libx264', '-profile:v', 'high', '-level', '4.1',
+        '-pix_fmt', 'yuv420p', '-preset', 'fast', '-crf', '20',
+        '-maxrate', '25000k', '-bufsize', '30000k',
+        '-bf', '0', '-g', '24', '-keyint_min', '24', '-sc_threshold', '0',
+        '-c:a', 'ac3', '-b:a', '192k', '-ac', '2',
+        '-t', String(duration), '-f', 'mpegts', menuTs,
+      ]);
+      let err = '';
+      ff.stderr.on('data', d => { err += d.toString(); });
+      ff.on('close', code => code === 0 && fs.existsSync(menuTs) ? resolve() : reject(new Error(`Menu TS failed (${code}): ${err.slice(-200)}`)));
+      ff.on('error', reject);
+    });
+    sendLog(`[Menu] Background TS: ${(fs.statSync(menuTs).size/1e3).toFixed(0)} KB`);
+
+    // Step 3: mkvmerge TS → MKV
+    await new Promise((resolve, reject) => {
+      const mkv = spawn(TOOLS.mkvmerge, ['-o', menuMkv, menuTs]);
+      mkv.on('close', code => (code === 0 || code === 1) && fs.existsSync(menuMkv) ? resolve() : reject(new Error(`mkvmerge failed (${code})`)));
+      mkv.on('error', reject);
+    });
+
+    // Step 4: tsMuxeR → menu BDMV (proper 192-byte BD m2ts)
+    fs.writeFileSync(menuMeta, [
+      'MUXOPT --blu-ray --new-audio-pes',
+      `V_MPEG4/ISO/AVC, "${tsPath(menuMkv)}", fps=24, insertSEI, contSPS, track=1`,
+      `A_AC3, "${tsPath(menuMkv)}", lang=und, track=2, default`,
+    ].join('\n') + '\n');
+    fs.mkdirSync(menuBdDir, { recursive: true });
+
+    await new Promise((resolve, reject) => {
+      const ts = spawn(TOOLS.tsmuxer, [menuMeta, menuBdDir]);
+      ts.on('close', code => {
+        const m2ts = path.join(menuBdDir, 'BDMV', 'STREAM', '00000.m2ts');
+        if (code !== 0 || !fs.existsSync(m2ts) || fs.statSync(m2ts).size < 50000) {
+          return reject(new Error(`tsMuxeR failed (${code})`));
+        }
+        sendLog(`[Menu] Video m2ts: ${(fs.statSync(m2ts).size/1e3).toFixed(0)} KB`);
+        resolve();
+      });
+      ts.on('error', reject);
+    });
+
+    // Step 5: generate IG display set and inject into m2ts
+    sendLog('[Menu] Generating IG display set (2-button menu)');
+    const igTs188 = buildMenuDisplaySet({ videoWidth: 1920, videoHeight: 1080, pl1, pl2, pts: 0 });
+    sendLog(`[Menu] IG stream: ${igTs188.length} bytes, ${igTs188.length/188} TS packets`);
+
+    const videoM2tsPath = path.join(menuBdDir, 'BDMV', 'STREAM', '00000.m2ts');
+    const videoM2ts     = fs.readFileSync(videoM2tsPath);
+    const menuM2ts      = injectIGIntoM2ts(videoM2ts, igTs188, 10);
+    sendLog(`[Menu] Combined menu m2ts: ${menuM2ts.length} bytes`);
+
+    // Step 6: copy menu files into disc structure as playlist 00000
+    fs.writeFileSync(videoM2tsPath, menuM2ts);  // update in-place for CLPI/MPLS consistency
+    const menuM2tsDest = path.join(streamDir, '00000.m2ts');
+    const menuClpiSrc  = path.join(menuBdDir, 'BDMV', 'CLIPINF', '00000.clpi');
+    const menuMplsSrc  = path.join(menuBdDir, 'BDMV', 'PLAYLIST', '00000.mpls');
+    fs.copyFileSync(videoM2tsPath, menuM2tsDest);
+    if (fs.existsSync(menuClpiSrc)) {
+      fs.copyFileSync(menuClpiSrc, path.join(clipDir, '00000.clpi'));
+      fs.copyFileSync(menuClpiSrc, path.join(bdFolder, 'BDMV', 'BACKUP', '00000.clpi'));
+    }
+    if (fs.existsSync(menuMplsSrc)) {
+      fs.copyFileSync(menuMplsSrc, path.join(playDir, '00000.mpls'));
+      fs.copyFileSync(menuMplsSrc, path.join(bdFolder, 'BDMV', 'BACKUP', '00000.mpls'));
+    }
+    sendLog(`[Menu] Menu m2ts installed as 00000.m2ts`);
+    sendLog(`[Menu] NOTE: CLPI STN_table IG patching not yet implemented.`);
+    sendLog(`[Menu] NOTE: libbluray will find video only until CLPI is patched for PID 0x${IG_PID.toString(16)}.`);
+
+    return true;
+  } catch (e) {
+    sendLog(`[Menu] addMenuToDisc error: ${e.message} — menu skipped`);
+    return false;
+  }
+}
+
 // ── IPC: combine episodes ─────────────────────────────────────────────────────
 
 ipcMain.handle('combine-episodes', async (_, { files, normalizeBeforeCombine }) => {
@@ -3543,7 +3679,7 @@ function fixMultiTitleNavigationForEpisodes(bdFolder, numEpisodes, ep1TsMuxerPre
 // Pipeline per episode: FFmpeg (libx264/AC3) → mkvmerge → tsMuxeR (--blu-ray)
 // Then merge all BDMV outputs and fix navigation.
 
-ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discName, fastEncode, resolution, useSplash, splashPngPath = null, splashDuration = 5, splashColor = '1a1a2e' }) => {
+ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discName, fastEncode, resolution, useSplash, splashPngPath = null, splashDuration = 5, splashColor = '1a1a2e', useMenu = false }) => {
   if (!TOOLS.ffmpeg)   return { error: 'FFmpeg not found.\n\nInstall: brew install ffmpeg' };
   if (!TOOLS.tsmuxer)  return { error: 'tsMuxeR not found.\n\nInstall: brew install --cask tsmuxer' };
   if (!TOOLS.mkvmerge) return { error: 'mkvmerge not found.\n\nInstall: brew install mkvtoolnix' };
@@ -4149,6 +4285,21 @@ ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discNa
     }
     await addSplashToDisc(bdFolder, splashPng, workDir, splashDuration);
     sendLog('[MT] Splash complete');
+  }
+
+  // ── Step 4b: Add interactive menu (experimental) ─────────────────────────
+  if (useMenu && !useSplash) {
+    sendLog('[MT] Adding interactive menu (Tier 2 IG — experimental)');
+    sendLog('[MT] NOTE: useMenu and useSplash are mutually exclusive — splash takes priority');
+    await addMenuToDisc(bdFolder, {
+      bgColor:  splashColor || '1a1a2e',
+      pl1:      0,
+      pl2:      1,
+      duration: 5,
+    }, workDir);
+    sendLog('[MT] Menu step complete (see above for CLPI limitation note)');
+  } else if (useMenu && useSplash) {
+    sendLog('[MT] NOTE: useMenu skipped — useSplash takes priority when both are enabled');
   }
 
   // ── Step 5: Create ISO ──────────────────────────────────────────────────────

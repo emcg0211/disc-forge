@@ -59,7 +59,7 @@ let state = {
   project: {
     title: '', description: '', discLabel: '',
     resolution: RESOLUTIONS[0], videoFormat: VIDEO_FMTS[0], outputDir: '', useSplash: false,
-    splashPngPath: null, splashDuration: 5, splashColor: '1a1a2e',
+    splashPngPath: null, splashDuration: 5, splashColor: '1a1a2e', useMenu: false,
     mainVideo: null,
     titles: [],   // additional video titles on the disc
     discSize: 'BD-25',
@@ -453,6 +453,7 @@ async function startBuild() {
       splashPngPath: p.splashPngPath || null,
       splashDuration: p.splashDuration || 5,
       splashColor: p.splashColor || '1a1a2e',
+      useMenu: p.useMenu || false,
     });
   } else {
     appendLog(`[Renderer] Single-title routing → buildDisc`);
@@ -1139,6 +1140,17 @@ function pageProject(p) {
             <label class="field-label">Video Codec</label>
             <select id="proj-vcodec">${VIDEO_FMTS.map(r=>`<option ${p.videoFormat===r?'selected':''}>${r}</option>`).join('')}</select>
           </div>
+        </div>
+        <div style="margin-top:12px">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--text-secondary)">
+            <input type="checkbox" id="use-menu" ${p.useMenu ? 'checked' : ''} style="width:14px;height:14px">
+            Add interactive menu (2-button, multi-title only) <span style="font-size:11px;color:var(--text-tertiary);margin-left:4px">[experimental]</span>
+          </label>
+          ${p.useMenu ? `
+          <div style="margin-top:6px;padding:8px 12px;background:var(--bg-secondary);border-radius:8px;font-size:12px;color:var(--text-tertiary)">
+            Generates a 2-button IG menu: Episode 1 / Episode 2. Background color is taken from the splash color setting.
+            CLPI IG stream declaration is not yet implemented — VLC will show the video background only.
+          </div>` : ''}
         </div>
         <div style="margin-top:12px">
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--text-secondary)">
@@ -2300,6 +2312,7 @@ function attachListeners() {
   document.getElementById('proj-res')?.addEventListener('change',   e => setPrj({ resolution: e.target.value }));
   document.getElementById('force-transcode')?.addEventListener('change', e => setPrj({ forceTranscode: e.target.checked }));
   document.getElementById('proj-vcodec')?.addEventListener('change',e => setPrj({ videoFormat: e.target.value }));
+  document.getElementById('use-menu')?.addEventListener('change',    e => setPrj({ useMenu:   e.target.checked }));
   document.getElementById('use-splash')?.addEventListener('change',  e => setPrj({ useSplash: e.target.checked }));
   document.getElementById('splash-duration')?.addEventListener('change', e => setPrj({ splashDuration: parseInt(e.target.value, 10) }));
   document.getElementById('splash-color')?.addEventListener('input',   e => setPrj({ splashColor: e.target.value.slice(1) }));
