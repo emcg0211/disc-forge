@@ -1899,7 +1899,12 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
       } else {
         subMetaLines.push(`A_AC3, "${tsPath(titleTs)}", lang=und, track=2`);
       }
-      // S_TEXT/UTF8 silently causes tsMuxeR --blu-ray to produce no output; text subs excluded.
+      // S_TEXT/UTF8 works with tsMuxeR --blu-ray when font-name=Arial is specified.
+      // Without a font-name, tsMuxeR fails with "Can't load symbol code '84' from font".
+      textSubs.forEach(sub => {
+        const lang = langCode(sub.language || 'und');
+        subMetaLines.push(`S_TEXT/UTF8, "${tsPath(sub.extractedPath)}", lang=${lang}, font-name=Arial, font-size=32, video-width=${vW}, video-height=${vH}, fps=${fpsToTsMuxer(fps)}`);
+      });
 
       const subMetaFile = path.join(workDir, `tsmuxer_title_${pad(titleIdx)}_subtmp.meta`);
       sendLog(`  fpsToTsMuxer: input="${fps}" → output="${fpsToTsMuxer(fps)}"`);
@@ -1950,7 +1955,10 @@ function processAdditionalTitle(project, workDir, tsDir, bdFolder, title, titleI
           const retryMetaLines = ['MUXOPT --blu-ray --new-audio-pes'];
           retryMetaLines.push(`${vCodec}, "${tsPath(forsubsMkv)}", fps=${fpsToTsMuxer(fps)}, track=1`);
           retryMetaLines.push(`A_AC3, "${tsPath(forsubsMkv)}", track=2`);
-          // S_TEXT/UTF8 silently causes tsMuxeR --blu-ray to produce no output; text subs excluded.
+          textSubs.forEach(sub => {
+            const lang = langCode(sub.language || 'und');
+            retryMetaLines.push(`S_TEXT/UTF8, "${tsPath(sub.extractedPath)}", lang=${lang}, font-name=Arial, font-size=32, video-width=${vW}, video-height=${vH}, fps=${fpsToTsMuxer(fps)}`);
+          });
 
           const retryMetaFile = path.join(workDir, `tsmuxer_title_${pad(titleIdx)}_subtmp2.meta`);
           sendLog(`  fpsToTsMuxer: input="${fps}" → output="${fpsToTsMuxer(fps)}"`);
@@ -3857,7 +3865,7 @@ ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discNa
           fs.writeFileSync(srtMetaPath, [
             'MUXOPT --blu-ray --new-audio-pes',
             `V_MPEG4/ISO/AVC, "${tsPath(mainTs)}", fps=${fpsToTsMuxer(safeFps)}, insertSEI, contSPS, track=1, video-width=${safeW}, video-height=${safeH}`,
-            `S_TEXT/UTF8, "${tsPath(srtFile)}", lang=${sub.lang}, video-width=${safeW}, video-height=${safeH}, fps=${fpsToTsMuxer(safeFps)}`,
+            `S_TEXT/UTF8, "${tsPath(srtFile)}", lang=${sub.lang}, font-name=Arial, font-size=32, video-width=${safeW}, video-height=${safeH}, fps=${fpsToTsMuxer(safeFps)}`,
           ].join('\n') + '\n');
 
           const srtTsErr = await new Promise(resolve => {
