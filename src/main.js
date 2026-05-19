@@ -3624,7 +3624,7 @@ async function addMenuToDisc(bdFolder, numEpisodes, workDir) {
 
   // ── Step 5: Build IG display set and inject into m2ts ─────────────────────
   const pl2 = numEpisodes >= 2 ? 2 : 1;
-  const igTs = buildMenuDisplaySet({ pl1: 1, pl2, pts: 9000 /* 0.1s in 90kHz — display early in clip */ });
+  const igTs = buildMenuDisplaySet({ pl1: 1, pl2, pts: 54009000 /* 600.1s — match tsMuxeR PTS offset + 100ms */ });
   const videoM2ts = fs.readFileSync(srcM2ts);
   const menuM2ts = injectIGIntoM2ts(videoM2ts, igTs);
   sendLog(`[Menu] IG injected: ${igTs.length} bytes TS → m2ts now ${menuM2ts.length} bytes`);
