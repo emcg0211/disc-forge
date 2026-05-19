@@ -43,8 +43,11 @@ const BTN2_X  = 560;
 const BTN2_Y  = 540;
 const BORDER  = 3;  // border thickness in pixels
 
-// IG stream PID (0x1200 is standard for BD IG)
-const IG_PID = 0x1200;
+// IG stream PID: BD spec assigns 0x1400-0x141F to Interactive Graphics.
+// 0x1200-0x121F is reserved for Presentation Graphics (subtitles).
+// libbluray IS_HDMV_PID_IG() checks range 0x1400-0x141F; using 0x1200
+// causes gc_decode_ts() to route the data to the PG decoder instead of IG.
+const IG_PID = 0x1400;
 
 /**
  * Render a button bitmap as a palette-indexed pixel array.
