@@ -27,11 +27,13 @@ const { buildNavCmd, buildIGDisplaySet, encodePDS, encodeODS, encodeWDS, encodeI
 
 // ── Palette definition ─────────────────────────────────────────────────────────
 // YCbCr-601 values. T=0 opaque, T=255 fully transparent.
+// Entry 3 was T=160 (63% transparent) — near-invisible on dark background.
+// Fixed to T=0 (opaque dark slate blue) so both buttons are clearly visible.
 const PALETTE = [
-  { id: 0, Y: 16,  Cr: 128, Cb: 128, T: 255 },  // transparent
-  { id: 1, Y: 235, Cr: 128, Cb: 128, T:   0 },  // white
-  { id: 2, Y:  76, Cr: 210, Cb:  85, T:   0 },  // red (selected highlight)
-  { id: 3, Y:  64, Cr: 128, Cb: 128, T: 160 },  // semi-transparent dark gray
+  { id: 0, Y: 16,  Cr: 128, Cb: 128, T: 255 },  // transparent (background shows through)
+  { id: 1, Y: 235, Cr: 128, Cb: 128, T:   0 },  // white border (both states)
+  { id: 2, Y: 112, Cr: 184, Cb:  42, T:   0 },  // orange-yellow (selected fill)
+  { id: 3, Y:  45, Cr: 103, Cb: 171, T:   0 },  // dark slate blue (normal fill)
 ];
 
 // ── Button geometry ───────────────────────────────────────────────────────────
