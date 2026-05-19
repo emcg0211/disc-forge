@@ -59,7 +59,7 @@ let state = {
   project: {
     title: '', description: '', discLabel: '',
     resolution: RESOLUTIONS[0], videoFormat: VIDEO_FMTS[0], outputDir: '', useSplash: false,
-    splashPngPath: null, splashDuration: 5, splashColor: '1a1a2e',
+    splashPngPath: null, splashDuration: 5, splashColor: '1a1a2e', useIGMenu: false,
     mainVideo: null,
     titles: [],   // additional video titles on the disc
     discSize: 'BD-25',
@@ -453,6 +453,7 @@ async function startBuild() {
       splashPngPath: p.splashPngPath || null,
       splashDuration: p.splashDuration || 5,
       splashColor: p.splashColor || '1a1a2e',
+      useIGMenu: p.useIGMenu || false,
     });
   } else {
     appendLog(`[Renderer] Single-title routing → buildDisc`);
@@ -1144,6 +1145,10 @@ function pageProject(p) {
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--text-secondary)">
             <input type="checkbox" id="use-splash" ${p.useSplash ? 'checked' : ''} style="width:14px;height:14px">
             Add splash screen before playback
+          </label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--text-secondary);margin-top:6px">
+            <input type="checkbox" id="use-ig-menu" ${p.useIGMenu ? 'checked' : ''} style="width:14px;height:14px">
+            Add interactive episode menu [experimental]
           </label>
           ${p.useSplash ? `
           <div style="margin-top:8px;padding:10px 12px;background:var(--bg-secondary);border-radius:8px;display:flex;flex-direction:column;gap:10px">
@@ -2301,6 +2306,7 @@ function attachListeners() {
   document.getElementById('force-transcode')?.addEventListener('change', e => setPrj({ forceTranscode: e.target.checked }));
   document.getElementById('proj-vcodec')?.addEventListener('change',e => setPrj({ videoFormat: e.target.value }));
   document.getElementById('use-splash')?.addEventListener('change',  e => setPrj({ useSplash: e.target.checked }));
+  document.getElementById('use-ig-menu')?.addEventListener('change', e => setPrj({ useIGMenu: e.target.checked }));
   document.getElementById('splash-duration')?.addEventListener('change', e => setPrj({ splashDuration: parseInt(e.target.value, 10) }));
   document.getElementById('splash-color')?.addEventListener('input',   e => setPrj({ splashColor: e.target.value.slice(1) }));
   document.getElementById('pick-splash-png')?.addEventListener('click', async () => {

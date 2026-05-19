@@ -3546,12 +3546,142 @@ function fixMultiTitleNavigationForEpisodes(bdFolder, numEpisodes, ep1TsMuxerPre
   sendLog(`[MT] fixNav: post-write validation passed`);
 }
 
+// ── addMenuToDisc ─────────────────────────────────────────────────────────────
+// Creates a 2-button IG interactive menu at playlist slot 99 (00099.mpls/.clpi/.m2ts).
+// Patches MovieObject obj[2] to boot to the menu (PLAY_PL(99)) instead of EP1 directly.
+//
+// Prerequisites:
+//   - Main disc already built at bdFolder (with episodes at 00001.mpls .. 000N.mpls)
+//   - fixMultiTitleNavigationForEpisodes already ran (obj[2] = PLAY_PL(1))
+//   - TOOLS.ffmpeg and TOOLS.tsmuxer available
+//
+// Menu button layout:
+//   Button 1 → PLAY_PL(1)  [Episode 1]
+//   Button 2 → PLAY_PL(2)  [Episode 2, or EP1 again for single-title]
+
+async function addMenuToDisc(bdFolder, numEpisodes, workDir) {
+  const { patchClpiForIG, patchMplsForIG, patchMplsClipName, buildMenuDisplaySet, injectIGIntoM2ts } =
+    require('./lib/menu-builder');
+
+  const menuDir  = path.join(workDir, 'menu_tmp');
+  const menuBdmv = path.join(menuDir, 'BDMV_MENU');
+  fs.mkdirSync(menuDir,  { recursive: true });
+  fs.mkdirSync(menuBdmv, { recursive: true });
+
+  // ── Step 1: Generate 5s solid-color menu background video (raw h264 ES) ──
+  // tsMuxeR requires raw elementary stream for non-TS inputs (no track= needed).
+  const menuH264 = path.join(menuDir, 'menu_bg.h264');
+  sendLog('[Menu] Generating 5s menu background video');
+  await new Promise((resolve, reject) => {
+    const ff = spawn(TOOLS.ffmpeg, [
+      '-y', '-f', 'lavfi',
+      '-i', 'color=c=0x1a1a2e:size=1920x1080:rate=24',
+      '-t', '5',
+      '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+      '-preset', 'ultrafast', '-crf', '28',
+      menuH264,
+    ]);
+    ff.stderr.on('data', () => {});
+    ff.on('error', reject);
+    ff.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg menu bg exit ${code}`)));
+  });
+
+  // ── Step 2: Run tsMuxeR to get BDMV structure for menu clip ───────────────
+  const menuMeta = path.join(menuDir, 'menu.meta');
+  fs.writeFileSync(menuMeta,
+    `MUXOPT --no-pcr-on-video-pid --new-audio-pes --blu-ray\n` +
+    `V_MPEG4/ISO/AVC, "${tsPath(menuH264)}", level=4.1, insertSEI, contSPS, lang=und, fps=24\n`
+  );
+  sendLog('[Menu] Running tsMuxeR for menu clip');
+  await new Promise((resolve, reject) => {
+    const proc = spawn(TOOLS.tsmuxer, [menuMeta, menuBdmv]);
+    proc.on('error', reject);
+    proc.on('close', code => code === 0 ? resolve() : reject(new Error(`tsMuxeR menu exit ${code}`)));
+  });
+
+  // tsMuxeR produces 00000.* (or 00001.* depending on version); find the video file
+  const streamDir = path.join(menuBdmv, 'BDMV', 'STREAM');
+  const clipinfDir = path.join(menuBdmv, 'BDMV', 'CLIPINF');
+  const playlistDir = path.join(menuBdmv, 'BDMV', 'PLAYLIST');
+  const produced = fs.readdirSync(streamDir).filter(f => f.endsWith('.m2ts')).sort();
+  if (produced.length === 0) throw new Error('[Menu] tsMuxeR produced no m2ts for menu clip');
+  const base = produced[0].replace('.m2ts', '');  // e.g. "00000" or "00001"
+  sendLog(`[Menu] tsMuxeR menu clip base: ${base}`);
+
+  const srcM2ts   = path.join(streamDir,   `${base}.m2ts`);
+  const srcClpi   = path.join(clipinfDir,  `${base}.clpi`);
+  const srcMpls   = path.join(playlistDir, `${base}.mpls`);
+
+  // ── Step 3: Patch MPLS clip reference and add IG stream declarations ───────
+  const rawMpls = fs.readFileSync(srcMpls);
+  const renamedMpls = patchMplsClipName(rawMpls, '00099');
+  const igMpls = patchMplsForIG(renamedMpls);
+
+  // ── Step 4: Patch CLPI to add IG stream declaration ───────────────────────
+  const rawClpi = fs.readFileSync(srcClpi);
+  const igClpi  = patchClpiForIG(rawClpi);
+  if (!igClpi) throw new Error('[Menu] patchClpiForIG failed — unexpected CLPI structure');
+
+  // ── Step 5: Build IG display set and inject into m2ts ─────────────────────
+  const pl2 = numEpisodes >= 2 ? 2 : 1;
+  const igTs = buildMenuDisplaySet({ pl1: 1, pl2, pts: 9000 /* 0.1s in 90kHz — display early in clip */ });
+  const videoM2ts = fs.readFileSync(srcM2ts);
+  const menuM2ts = injectIGIntoM2ts(videoM2ts, igTs);
+  sendLog(`[Menu] IG injected: ${igTs.length} bytes TS → m2ts now ${menuM2ts.length} bytes`);
+
+  // ── Step 6: Install 00099.* into main disc ─────────────────────────────────
+  const destStream   = path.join(bdFolder, 'BDMV', 'STREAM');
+  const destClipinf  = path.join(bdFolder, 'BDMV', 'CLIPINF');
+  const destPlaylist = path.join(bdFolder, 'BDMV', 'PLAYLIST');
+
+  fs.writeFileSync(path.join(destStream,   '00099.m2ts'), menuM2ts);
+  fs.writeFileSync(path.join(destClipinf,  '00099.clpi'), igClpi);
+  fs.writeFileSync(path.join(destPlaylist, '00099.mpls'), igMpls);
+  sendLog('[Menu] Installed 00099.m2ts / 00099.clpi / 00099.mpls');
+
+  // ── Step 7: Patch MovieObject obj[2] → PLAY_PL(99) ────────────────────────
+  // fixMultiTitleNavigationForEpisodes set obj[2] last cmd to PLAY_PL(1).
+  // We change playlist ID from 1 to 99 (menu playlist).
+  const mobjPath = path.join(bdFolder, 'BDMV', 'MovieObject.bdmv');
+  const mobjBuf  = Buffer.from(fs.readFileSync(mobjPath));
+
+  const MOBJ_STRUCT_OFF = 40;
+  const NUM_OBJS_OFF    = 48;
+  const numObjs = mobjBuf.readUInt16BE(NUM_OBJS_OFF);
+
+  let pos = NUM_OBJS_OFF + 2;
+  let obj2Pos = -1;
+  for (let i = 0; i < numObjs; i++) {
+    const numCmds = mobjBuf.readUInt16BE(pos + 2);
+    if (i === 2) obj2Pos = pos;
+    pos += 4 + numCmds * 12;
+  }
+
+  if (obj2Pos === -1) {
+    sendLog('[Menu] WARNING: MovieObject obj[2] not found — menu will not boot correctly');
+    return;
+  }
+
+  const numCmds2  = mobjBuf.readUInt16BE(obj2Pos + 2);
+  const lastCmdOff = obj2Pos + 4 + (numCmds2 - 1) * 12;
+  const lastOpcode = mobjBuf.readUInt32BE(lastCmdOff);
+
+  if (lastOpcode !== 0x22800000) {
+    sendLog(`[Menu] WARNING: obj[2] last cmd opcode 0x${lastOpcode.toString(16)} is not PLAY_PL — skipping MovieObject patch`);
+    return;
+  }
+
+  mobjBuf.writeUInt32BE(99, lastCmdOff + 4);  // change playlist ID → 99
+  fs.writeFileSync(mobjPath, mobjBuf);
+  sendLog('[Menu] MovieObject obj[2] patched: PLAY_PL(1) → PLAY_PL(99)');
+}
+
 // ── IPC: build multi-title disc ───────────────────────────────────────────────
 // Each episode becomes a separately selectable title on the disc.
 // Pipeline per episode: FFmpeg (libx264/AC3) → mkvmerge → tsMuxeR (--blu-ray)
 // Then merge all BDMV outputs and fix navigation.
 
-ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discName, fastEncode, resolution, useSplash, splashPngPath = null, splashDuration = 5, splashColor = '1a1a2e' }) => {
+ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discName, fastEncode, resolution, useSplash, splashPngPath = null, splashDuration = 5, splashColor = '1a1a2e', useIGMenu = false }) => {
   if (!TOOLS.ffmpeg)   return { error: 'FFmpeg not found.\n\nInstall: brew install ffmpeg' };
   if (!TOOLS.tsmuxer)  return { error: 'tsMuxeR not found.\n\nInstall: brew install --cask tsmuxer' };
   if (!TOOLS.mkvmerge) return { error: 'mkvmerge not found.\n\nInstall: brew install mkvtoolnix' };
@@ -4157,6 +4287,17 @@ ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discNa
     }
     await addSplashToDisc(bdFolder, splashPng, workDir, splashDuration);
     sendLog('[MT] Splash complete');
+  }
+
+  // ── Step 4d: Interactive IG menu (experimental) ───────────────────────────
+  if (useIGMenu) {
+    sendLog('[MT] Adding interactive IG menu (experimental)');
+    try {
+      await addMenuToDisc(bdFolder, episodes.length, workDir);
+      sendLog('[MT] IG menu complete');
+    } catch(e) {
+      sendLog(`[MT] IG menu FAILED (non-fatal): ${e.message}`);
+    }
   }
 
   // ── Step 5: Create ISO ──────────────────────────────────────────────────────

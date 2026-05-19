@@ -846,5 +846,135 @@ def main():
         print(__doc__)
         print("\nAvailable commands: baseline, h-fps24, h-post, h-all")
 
+
+# ── Harness extension: check_subtitles ───────────────────────────────────────
+def check_subtitles(bd_folder, expected_pg_count=1):
+    """
+    Verify that each episode MPLS has num_PG >= expected_pg_count in its STN_table.
+    Returns True if all checks pass.
+    """
+    playlist_dir = os.path.join(bd_folder, 'BDMV', 'PLAYLIST')
+    if not os.path.isdir(playlist_dir):
+        print(f"  ✗ check_subtitles: PLAYLIST dir not found at {playlist_dir}")
+        return False
+
+    mpls_files = sorted(f for f in os.listdir(playlist_dir)
+                        if f.endswith('.mpls') and f != '00099.mpls')
+    if not mpls_files:
+        print("  ✗ check_subtitles: no episode MPLS files found")
+        return False
+
+    all_ok = True
+    for fname in mpls_files:
+        path_ = os.path.join(playlist_dir, fname)
+        try:
+            data = open(path_, 'rb').read()
+            pl_start   = u32(data, 8)
+            pi_off     = pl_start + 10  # PlayItem[0]
+            stn_off    = pi_off + 34
+            num_pg     = data[stn_off + 6]
+            ok = num_pg >= expected_pg_count
+            sym = '✓' if ok else '✗'
+            print(f"  {sym} {fname}: num_PG={num_pg} (expect>={expected_pg_count})")
+            if not ok: all_ok = False
+        except Exception as e:
+            print(f"  ✗ {fname}: error parsing MPLS — {e}")
+            all_ok = False
+    return all_ok
+
+
+# ── Harness extension: check_menu ────────────────────────────────────────────
+def check_menu(bd_folder):
+    """
+    Verify that the IG menu at slot 00099 is correctly structured:
+    - 00099.m2ts exists and contains IG TS packets (PID 0x1200)
+    - 00099.clpi has a stream with coding_type=0x91 (IG)
+    - 00099.mpls references clip "00099" and has num_IG=1
+    - MovieObject.bdmv obj[2] last command is PLAY_PL(99)
+    Returns True if all checks pass.
+    """
+    stream_dir   = os.path.join(bd_folder, 'BDMV', 'STREAM')
+    clipinf_dir  = os.path.join(bd_folder, 'BDMV', 'CLIPINF')
+    playlist_dir = os.path.join(bd_folder, 'BDMV', 'PLAYLIST')
+    mobj_path    = os.path.join(bd_folder, 'BDMV', 'MovieObject.bdmv')
+
+    all_ok = True
+    print("\n── check_menu ──")
+
+    def chk(label, cond, detail=''):
+        nonlocal all_ok
+        sym = '✓' if cond else '✗'
+        print(f"  {sym} {label}" + (f": {detail}" if detail else ''))
+        if not cond: all_ok = False
+
+    # 1. m2ts has IG packets
+    m2ts_path = os.path.join(stream_dir, '00099.m2ts')
+    chk('00099.m2ts exists', os.path.exists(m2ts_path))
+    if os.path.exists(m2ts_path):
+        data = open(m2ts_path, 'rb').read()
+        ig_count = 0
+        for i in range(4, len(data) - 188, 192):
+            if data[i] == 0x47:
+                pid = ((data[i+1] & 0x1F) << 8) | data[i+2]
+                if pid == 0x1200:
+                    ig_count += 1
+        chk('00099.m2ts has IG packets (PID 0x1200)', ig_count > 0, f'{ig_count} packets')
+
+    # 2. CLPI has IG stream (coding_type=0x91)
+    clpi_path = os.path.join(clipinf_dir, '00099.clpi')
+    chk('00099.clpi exists', os.path.exists(clpi_path))
+    if os.path.exists(clpi_path):
+        data = open(clpi_path, 'rb').read()
+        pi_addr    = u32(data, 0x0C)
+        num_st     = data[pi_addr + 6 + 6]
+        found_ig   = False
+        off = pi_addr + 14
+        for i in range(num_st):
+            entry_len = data[off + 2]
+            ctype     = data[off + 3]
+            if ctype == 0x91:
+                found_ig = True
+            off += 3 + entry_len
+        chk('00099.clpi has IG stream (coding_type=0x91)', found_ig,
+            f'{num_st} streams, IG={"yes" if found_ig else "no"}')
+
+    # 3. MPLS clip name and num_IG
+    mpls_path = os.path.join(playlist_dir, '00099.mpls')
+    chk('00099.mpls exists', os.path.exists(mpls_path))
+    if os.path.exists(mpls_path):
+        data     = open(mpls_path, 'rb').read()
+        pl_start = u32(data, 8)
+        pi_off   = pl_start + 10
+        clip_name = data[pi_off+2:pi_off+7].decode('ascii', errors='replace')
+        stn_off   = pi_off + 34
+        num_ig    = data[stn_off + 7]
+        chk('00099.mpls clip reference is "00099"', clip_name == '00099', repr(clip_name))
+        chk('00099.mpls num_IG=1', num_ig == 1, str(num_ig))
+
+    # 4. MovieObject obj[2] → PLAY_PL(99)
+    chk('MovieObject.bdmv exists', os.path.exists(mobj_path))
+    if os.path.exists(mobj_path):
+        data = open(mobj_path, 'rb').read()
+        num_objs = u16(data, 48)  # num_objects is at offset 48 (MOBJ_STRUCT_OFF=40 + 8)
+        pos = 50  # objects start at 50 (= 48 + 2 bytes for num_objs field)
+        obj2_pos = -1
+        for i in range(num_objs):
+            num_cmds = u16(data, pos + 2)
+            if i == 2: obj2_pos = pos
+            pos += 4 + num_cmds * 12
+        if obj2_pos >= 0:
+            num_cmds2 = u16(data, obj2_pos + 2)
+            last_off  = obj2_pos + 4 + (num_cmds2 - 1) * 12
+            opcode    = u32(data, last_off)
+            pl_id     = u32(data, last_off + 4)
+            is_play_pl_99 = (opcode == 0x22800000 and pl_id == 99)
+            chk('MovieObject obj[2] → PLAY_PL(99)', is_play_pl_99,
+                f'opcode=0x{opcode:08X} pl_id={pl_id}')
+        else:
+            chk('MovieObject has >=3 objects', False, f'only {num_objs} objects')
+
+    return all_ok
+
+
 if __name__ == '__main__':
     main()
