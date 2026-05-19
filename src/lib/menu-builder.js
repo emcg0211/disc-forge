@@ -8,20 +8,24 @@
  *
  * Architecture:
  *   buildMenuDisplaySet(options) → Buffer (TS-packetized IG PES stream)
- *     → renderButtonPixels(...)        creates RLE-ready palette-indexed bitmaps
+ *     → renderButtonBitmap(text,state) or renderButtonPixels(state)
  *     → ig-encoder.buildIGDisplaySet() assembles the full BD IG display set
  *
  * Palette:
  *   0 = transparent (background video shows through)
- *   1 = white text/border
- *   2 = red/orange highlight (selected button)
- *   3 = dark gray (normal button)
+ *   1 = white (text + border)
+ *   2 = orange (selected button fill, YCbCr → RGB ≈ 201,100,0)
+ *   3 = dark slate blue (normal button fill, YCbCr → RGB ≈ 0,37,120)
  *
  * Button layout (1920×1080 canvas):
  *   Button 1 (obj 0/1/2): 800×90 at (560, 420)  — Episode 1 → PLAY_PL(0)
  *   Button 2 (obj 3/4/5): 800×90 at (560, 540)  — Episode 2 → PLAY_PL(1)
  *   (3 object IDs per button: normal=0, selected=1, activated=2)
  */
+
+const path = require('path');
+const fs   = require('fs');
+const { execFileSync } = require('child_process');
 
 const { buildNavCmd, buildIGDisplaySet, encodePDS, encodeODS, encodeWDS, encodeICS, encodeEND, encodeRLE, wrapInPES, buildSegment, SEG } = require('./ig-encoder');
 
@@ -44,6 +48,95 @@ const BTN1_Y  = 420;
 const BTN2_X  = 560;
 const BTN2_Y  = 540;
 const BORDER  = 3;  // border thickness in pixels
+
+// ── Text rendering constants ──────────────────────────────────────────────────
+// Font for drawtext (SIL Open Font License — Inter Regular).
+const FONT_PATH = path.join(__dirname, '../assets/fonts/MenuFont.ttf');
+
+// RGB equivalents of our YCbCr palette entries — used for ffmpeg bg and pixel quantization.
+// Derived from: R = 1.164*(Y-16) + 1.596*(Cr-128), G = ..., B = ...
+const ENTRY_RGB = {
+  2: [201, 100,   0],  // orange (selected fill)
+  3: [  0,  37, 120],  // dark slate blue (normal fill)
+};
+// Hex strings for ffmpeg color= filter
+const ENTRY_HEX = {
+  2: 'c96400',  // orange
+  3: '002578',  // dark blue
+};
+
+function _colorDist2(r1, g1, b1, r2, g2, b2) {
+  return (r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1 - b2) ** 2;
+}
+
+/**
+ * Render a button bitmap with text label using ffmpeg drawtext.
+ * Falls back to renderButtonPixels if ffmpeg or font is unavailable.
+ *
+ * @param {string} text       - button label text
+ * @param {'normal'|'selected'|'activated'} state
+ * @param {number} w          - button width in pixels
+ * @param {number} h          - button height in pixels
+ * @param {string} ffmpegPath - path to ffmpeg binary
+ * @returns {Uint8Array} palette-indexed pixel array (w*h bytes)
+ */
+function renderButtonBitmap(text, state, w, h, ffmpegPath) {
+  if (!ffmpegPath || !fs.existsSync(ffmpegPath) || !fs.existsSync(FONT_PATH) || !text) {
+    return renderButtonPixels(w, h, state);
+  }
+
+  const fillEntry = state === 'normal' ? 3 : 2;
+  const fillRGB   = ENTRY_RGB[fillEntry];
+  const bgHex     = ENTRY_HEX[fillEntry];
+  const fontSize  = Math.round((h - BORDER * 2) * 0.55);
+
+  // Escape characters that break ffmpeg filter syntax
+  const safeText = (text || '')
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "’")    // curly apostrophe (avoids shell quoting issues)
+    .replace(/:/g, '\\:')
+    .replace(/\[/g, '\\[')
+    .replace(/\]/g, '\\]');
+
+  let rawData;
+  try {
+    rawData = execFileSync(ffmpegPath, [
+      '-f', 'lavfi',
+      '-i', `color=c=0x${bgHex}:size=${w}x${h}:rate=1`,
+      '-frames:v', '1',
+      '-vf', `drawtext=fontfile=${FONT_PATH}:text='${safeText}':fontsize=${fontSize}:fontcolor=white:x=(w-tw)/2:y=(h-th)/2`,
+      '-f', 'rawvideo', '-pix_fmt', 'rgb24',
+      'pipe:1',
+    ], { stdio: ['ignore', 'pipe', 'ignore'] });
+  } catch {
+    return renderButtonPixels(w, h, state);
+  }
+
+  if (!rawData || rawData.length < w * h * 3) {
+    return renderButtonPixels(w, h, state);
+  }
+
+  // Quantize RGB pixels to nearest palette entry (1=white vs fillEntry)
+  const WHITE = [255, 255, 255];
+  const pixels = new Uint8Array(w * h);
+  for (let i = 0; i < w * h; i++) {
+    const r = rawData[i * 3], g = rawData[i * 3 + 1], b = rawData[i * 3 + 2];
+    const dWhite = _colorDist2(r, g, b, WHITE[0], WHITE[1], WHITE[2]);
+    const dFill  = _colorDist2(r, g, b, fillRGB[0], fillRGB[1], fillRGB[2]);
+    pixels[i] = dWhite <= dFill ? 1 : fillEntry;
+  }
+
+  // Overlay 3px white border
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (x < BORDER || x >= w - BORDER || y < BORDER || y >= h - BORDER) {
+        pixels[y * w + x] = 1;
+      }
+    }
+  }
+
+  return pixels;
+}
 
 // IG stream PID: BD spec assigns 0x1400-0x141F to Interactive Graphics.
 // 0x1200-0x121F is reserved for Presentation Graphics (subtitles).
@@ -86,21 +179,26 @@ function renderButtonPixels(w, h, state) {
  *   1 = Episode 2 button → PLAY_PL(1)
  *
  * @param {object} opts
- * @param {number} opts.videoWidth   - video frame width (default 1920)
- * @param {number} opts.videoHeight  - video frame height (default 1080)
- * @param {number} opts.pl1          - playlist ID for episode 1 button (default 0)
- * @param {number} opts.pl2          - playlist ID for episode 2 button (default 1)
- * @param {number} opts.pts          - PTS for the display set in 90kHz ticks (default 0)
+ * @param {number}   opts.videoWidth   - video frame width (default 1920)
+ * @param {number}   opts.videoHeight  - video frame height (default 1080)
+ * @param {number}   opts.pl1          - playlist ID for episode 1 button (default 0)
+ * @param {number}   opts.pl2          - playlist ID for episode 2 button (default 1)
+ * @param {number}   opts.pts          - PTS for the display set in 90kHz ticks (default 0)
+ * @param {string[]} opts.labels       - button label text array (default: ["Play Episode 1", "Play Episode 2"])
+ * @param {string}   opts.ffmpegPath   - ffmpeg binary path for text rendering (omit for plain-color fallback)
  * @returns {Buffer} TS-packetized IG PES stream (188-byte packets)
  */
-function buildMenuDisplaySet({ videoWidth = 1920, videoHeight = 1080, pl1 = 0, pl2 = 1, pts = 0 } = {}) {
-  // Render button bitmaps for all 6 object states
-  const btn1Normal   = renderButtonPixels(BTN_W, BTN_H, 'normal');
-  const btn1Selected = renderButtonPixels(BTN_W, BTN_H, 'selected');
-  const btn1Activ    = renderButtonPixels(BTN_W, BTN_H, 'activated');
-  const btn2Normal   = renderButtonPixels(BTN_W, BTN_H, 'normal');
-  const btn2Selected = renderButtonPixels(BTN_W, BTN_H, 'selected');
-  const btn2Activ    = renderButtonPixels(BTN_W, BTN_H, 'activated');
+function buildMenuDisplaySet({ videoWidth = 1920, videoHeight = 1080, pl1 = 0, pl2 = 1, pts = 0, labels = [], ffmpegPath = null } = {}) {
+  const label1 = labels[0] || 'Play Episode 1';
+  const label2 = labels[1] || 'Play Episode 2';
+
+  // Render button bitmaps for all 6 object states (with text if ffmpegPath provided)
+  const btn1Normal   = renderButtonBitmap(label1, 'normal',    BTN_W, BTN_H, ffmpegPath);
+  const btn1Selected = renderButtonBitmap(label1, 'selected',  BTN_W, BTN_H, ffmpegPath);
+  const btn1Activ    = renderButtonBitmap(label1, 'activated', BTN_W, BTN_H, ffmpegPath);
+  const btn2Normal   = renderButtonBitmap(label2, 'normal',    BTN_W, BTN_H, ffmpegPath);
+  const btn2Selected = renderButtonBitmap(label2, 'selected',  BTN_W, BTN_H, ffmpegPath);
+  const btn2Activ    = renderButtonBitmap(label2, 'activated', BTN_W, BTN_H, ffmpegPath);
 
   // Nav commands: button activation → PLAY_PL(playlist ID)
   const cmd1 = buildNavCmd('PLAY_PL', pl1);
@@ -407,6 +505,8 @@ function patchMplsClipName(mplsBuf, name) {
 
 module.exports = {
   buildMenuDisplaySet,
+  renderButtonBitmap,
+  renderButtonPixels,
   convertTsBdFormat,
   injectIGIntoM2ts,
   patchClpiForIG,
@@ -415,4 +515,6 @@ module.exports = {
   IG_PID,
   BTN_W, BTN_H, BTN1_X, BTN1_Y, BTN2_X, BTN2_Y,
   PALETTE,
+  ENTRY_RGB,
+  FONT_PATH,
 };
