@@ -518,7 +518,7 @@ function wrapInPES(segmentData, pid = 0x1200, pts = 0, startCC = 0) {
   hdr[0] = 0x00; hdr[1] = 0x00; hdr[2] = 0x01;
   hdr[3] = PES_STREAM_ID;
   hdr.writeUInt16BE(Math.min(pesLength, 0xFFFF), 4);
-  hdr[6] = 0x80;  // marker=1
+  hdr[6] = 0x84;  // marker=1 | data_alignment_indicator (bit 2, required for IG PES)
   hdr[7] = 0x80;  // PTS only (PTS_DTS_flags=10)
   hdr[8] = 0x05;  // PES_header_data_length = 5 bytes (PTS)
   const pes = Buffer.concat([hdr, ptsBuf, segmentData]);

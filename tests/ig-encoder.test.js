@@ -289,7 +289,7 @@ console.log('\n=== 4f: MPEG-TS packetizer ===');
   const pesStart = 5 + afLen;
   assertBufEq(ts.slice(pesStart, pesStart + 3), Buffer.from([0x00, 0x00, 0x01]), 'PES start code 0x000001');
   assertEq(ts[pesStart + 3], 0xBD, 'PES stream_id = 0xBD');
-  assertEq(ts[pesStart + 6], 0x80, 'PES flags byte 1 = 0x80 (marker)');
+  assertEq(ts[pesStart + 6], 0x84, 'PES flags byte 1 = 0x84 (marker | data_alignment_indicator)');
   assertEq(ts[pesStart + 7], 0x80, 'PES flags byte 2 = 0x80 (PTS only)');
   assertEq(ts[pesStart + 8], 0x05, 'PES header_data_length = 5');
 }
