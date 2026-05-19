@@ -581,8 +581,20 @@ function buildIGDisplaySet({ composition, palette, windows, objects, pid, pts })
   const ods  = (objects || []).map(o => encodeODS(o));
   const end  = encodeEND();
 
-  const displaySet = Buffer.concat([ics, pds, wds, ...ods, end]);
-  return wrapInPES(displaySet, pid, pts);
+  // BD spec: each segment must be in its own PES packet.
+  // m2ts_demux creates one PES_BUFFER per PES; graphics_processor_decode_pes
+  // processes one segment per PES_BUFFER then advances to next — all segments
+  // in a single PES means only the first (ICS) is decoded, END never reached,
+  // s->complete stays 0, and GC_CTRL_INIT_MENU is never called.
+  // CC must be continuous across all PES packets for the same PID.
+  const segments = [ics, pds, wds, ...ods, end];
+  let cc = 0;
+  const pesPackets = segments.map(seg => {
+    const pkt = wrapInPES(seg, pid, pts, cc);
+    cc = (cc + Math.ceil((14 + seg.length) / 184)) & 0x0F;
+    return pkt;
+  });
+  return Buffer.concat(pesPackets);
 }
 
 // ── Exports ───────────────────────────────────────────────────────────────────
