@@ -3559,7 +3559,7 @@ function fixMultiTitleNavigationForEpisodes(bdFolder, numEpisodes, ep1TsMuxerPre
 //   Button 1 → PLAY_PL(1)  [Episode 1]
 //   Button 2 → PLAY_PL(2)  [Episode 2, or EP1 again for single-title]
 
-async function addMenuToDisc(bdFolder, numEpisodes, workDir) {
+async function addMenuToDisc(bdFolder, numEpisodes, workDir, igMenuConfig = {}) {
   const { patchClpiForIG, patchMplsForIG, patchMplsClipName, buildMenuDisplaySet, injectIGIntoM2ts } =
     require('./lib/menu-builder');
 
@@ -3623,10 +3623,13 @@ async function addMenuToDisc(bdFolder, numEpisodes, workDir) {
   if (!igClpi) throw new Error('[Menu] patchClpiForIG failed — unexpected CLPI structure');
 
   // ── Step 5: Build IG display set and inject into m2ts ─────────────────────
-  const pl2 = numEpisodes >= 2 ? 2 : 1;
-  const menuLabels = Array.from({ length: numEpisodes }, (_, i) => `Play Episode ${i + 1}`);
+  const configLabels = igMenuConfig.buttonLabels || [];
+  const menuLabels = Array.from({ length: numEpisodes }, (_, i) =>
+    (configLabels[i] && configLabels[i].trim()) ? configLabels[i].trim() : `Play Episode ${i + 1}`
+  );
+  const playlists = Array.from({ length: numEpisodes }, (_, i) => i + 1);
   const igTs = buildMenuDisplaySet({
-    pl1: 1, pl2,
+    playlists,
     pts: 54009000,
     labels:     menuLabels,
     ffmpegPath: TOOLS.ffmpeg,
@@ -3687,7 +3690,7 @@ async function addMenuToDisc(bdFolder, numEpisodes, workDir) {
 // Pipeline per episode: FFmpeg (libx264/AC3) → mkvmerge → tsMuxeR (--blu-ray)
 // Then merge all BDMV outputs and fix navigation.
 
-ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discName, fastEncode, resolution, useSplash, splashPngPath = null, splashDuration = 5, splashColor = '1a1a2e', useIGMenu = false }) => {
+ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discName, fastEncode, resolution, useSplash, splashPngPath = null, splashDuration = 5, splashColor = '1a1a2e', useIGMenu = false, igMenuConfig = {} }) => {
   if (!TOOLS.ffmpeg)   return { error: 'FFmpeg not found.\n\nInstall: brew install ffmpeg' };
   if (!TOOLS.tsmuxer)  return { error: 'tsMuxeR not found.\n\nInstall: brew install --cask tsmuxer' };
   if (!TOOLS.mkvmerge) return { error: 'mkvmerge not found.\n\nInstall: brew install mkvtoolnix' };
@@ -4299,7 +4302,7 @@ ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discNa
   if (useIGMenu) {
     sendLog('[MT] Adding interactive IG menu (experimental)');
     try {
-      await addMenuToDisc(bdFolder, episodes.length, workDir);
+      await addMenuToDisc(bdFolder, episodes.length, workDir, igMenuConfig);
       sendLog('[MT] IG menu complete');
     } catch(e) {
       sendLog(`[MT] IG menu FAILED (non-fatal): ${e.message}`);

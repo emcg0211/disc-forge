@@ -2,9 +2,9 @@
 /**
  * menu-builder.js — Tier 2 interactive menu generator for BD-ROM discs.
  *
- * Generates a minimal 2-button IG display set for use as a disc menu.
- * The display set is suitable for injection into a menu m2ts alongside
- * a solid-color background video.
+ * Generates an N-button IG display set for use as a disc menu (2–9 episodes).
+ * Buttons are centered vertically and horizontally on the 1920×1080 frame.
+ * The display set is injected into a solid-color background video m2ts.
  *
  * Architecture:
  *   buildMenuDisplaySet(options) → Buffer (TS-packetized IG PES stream)
@@ -17,10 +17,9 @@
  *   2 = orange (selected button fill, YCbCr → RGB ≈ 201,100,0)
  *   3 = dark slate blue (normal button fill, YCbCr → RGB ≈ 0,37,120)
  *
- * Button layout (1920×1080 canvas):
- *   Button 1 (obj 0/1/2): 800×90 at (560, 420)  — Episode 1 → PLAY_PL(0)
- *   Button 2 (obj 3/4/5): 800×90 at (560, 540)  — Episode 2 → PLAY_PL(1)
- *   (3 object IDs per button: normal=0, selected=1, activated=2)
+ * Button layout (auto-centered, 800×90 each, 30px gap):
+ *   Button i (obj i*3/i*3+1/i*3+2): Episode i+1 → PLAY_PL(i+1)
+ *   Single WDS window covers all buttons (BD spec: max 2 windows per page).
  */
 
 const path = require('path');
@@ -43,11 +42,8 @@ const PALETTE = [
 // ── Button geometry ───────────────────────────────────────────────────────────
 const BTN_W   = 800;
 const BTN_H   = 90;
-const BTN1_X  = 560;
-const BTN1_Y  = 420;
-const BTN2_X  = 560;
-const BTN2_Y  = 540;
-const BORDER  = 3;  // border thickness in pixels
+const BTN_GAP = 30;  // vertical gap between buttons
+const BORDER  = 3;   // border thickness in pixels
 
 // ── Text rendering constants ──────────────────────────────────────────────────
 // Font for drawtext (SIL Open Font License — Inter Regular).
@@ -168,119 +164,95 @@ function renderButtonPixels(w, h, state) {
 }
 
 /**
- * Build the complete IG display set for a 2-button menu.
+ * Build the complete IG display set for an N-button menu.
+ * Buttons are auto-laid out and centered vertically on the frame.
+ * Object IDs: i*3+0 = normal, i*3+1 = selected, i*3+2 = activated for button i.
  *
- * Object IDs:
- *   0 = btn1 normal,  1 = btn1 selected,  2 = btn1 activated
- *   3 = btn2 normal,  4 = btn2 selected,  5 = btn2 activated
- *
- * Button IDs:
- *   0 = Episode 1 button → PLAY_PL(0)
- *   1 = Episode 2 button → PLAY_PL(1)
- *
- * @param {object} opts
+ * @param {object}   opts
  * @param {number}   opts.videoWidth   - video frame width (default 1920)
  * @param {number}   opts.videoHeight  - video frame height (default 1080)
- * @param {number}   opts.pl1          - playlist ID for episode 1 button (default 0)
- * @param {number}   opts.pl2          - playlist ID for episode 2 button (default 1)
+ * @param {number[]} opts.playlists    - playlist IDs for each button (e.g. [1,2,3])
+ * @param {number}   opts.pl1          - legacy: playlist for button 0 (ignored when playlists provided)
+ * @param {number}   opts.pl2          - legacy: playlist for button 1 (ignored when playlists provided)
  * @param {number}   opts.pts          - PTS for the display set in 90kHz ticks (default 0)
- * @param {string[]} opts.labels       - button label text array (default: ["Play Episode 1", "Play Episode 2"])
- * @param {string}   opts.ffmpegPath   - ffmpeg binary path for text rendering (omit for plain-color fallback)
+ * @param {string[]} opts.labels       - button label text array
+ * @param {string}   opts.ffmpegPath   - ffmpeg binary path for text rendering
  * @returns {Buffer} TS-packetized IG PES stream (188-byte packets)
  */
-function buildMenuDisplaySet({ videoWidth = 1920, videoHeight = 1080, pl1 = 0, pl2 = 1, pts = 0, labels = [], ffmpegPath = null } = {}) {
-  const label1 = labels[0] || 'Play Episode 1';
-  const label2 = labels[1] || 'Play Episode 2';
+function buildMenuDisplaySet({ videoWidth = 1920, videoHeight = 1080, playlists = null, pl1 = 0, pl2 = 1, pts = 0, labels = [], ffmpegPath = null } = {}) {
+  const playlistIds = playlists || [pl1, pl2];
+  const N = playlistIds.length;
 
-  // Render button bitmaps for all 6 object states (with text if ffmpegPath provided)
-  const btn1Normal   = renderButtonBitmap(label1, 'normal',    BTN_W, BTN_H, ffmpegPath);
-  const btn1Selected = renderButtonBitmap(label1, 'selected',  BTN_W, BTN_H, ffmpegPath);
-  const btn1Activ    = renderButtonBitmap(label1, 'activated', BTN_W, BTN_H, ffmpegPath);
-  const btn2Normal   = renderButtonBitmap(label2, 'normal',    BTN_W, BTN_H, ffmpegPath);
-  const btn2Selected = renderButtonBitmap(label2, 'selected',  BTN_W, BTN_H, ffmpegPath);
-  const btn2Activ    = renderButtonBitmap(label2, 'activated', BTN_W, BTN_H, ffmpegPath);
+  // Auto-layout: center all buttons vertically, left-align buttons horizontally
+  const totalH = N * BTN_H + (N - 1) * BTN_GAP;
+  const topY   = Math.round((videoHeight - totalH) / 2);
+  const btnX   = Math.round((videoWidth  - BTN_W)  / 2);
+  const btnY   = Array.from({ length: N }, (_, i) => topY + i * (BTN_H + BTN_GAP));
 
-  // Nav commands: button activation → PLAY_PL(playlist ID)
-  const cmd1 = buildNavCmd('PLAY_PL', pl1);
-  const cmd2 = buildNavCmd('PLAY_PL', pl2);
+  // Render 3 bitmaps per button (normal, selected, activated)
+  const bitmaps = playlistIds.map((_, i) => {
+    const label = (labels[i] && labels[i].trim()) ? labels[i].trim() : `Play Episode ${i + 1}`;
+    return {
+      normal:    renderButtonBitmap(label, 'normal',    BTN_W, BTN_H, ffmpegPath),
+      selected:  renderButtonBitmap(label, 'selected',  BTN_W, BTN_H, ffmpegPath),
+      activated: renderButtonBitmap(label, 'activated', BTN_W, BTN_H, ffmpegPath),
+    };
+  });
+
+  // One BOG per button, circular up/down navigation
+  const bogs = playlistIds.map((pl, i) => ({
+    defaultValidButtonIdRef: i,
+    buttons: [{
+      id:                 i,
+      numericSelectValue: i + 1,
+      autoActionFlag:     false,
+      x:                  btnX,
+      y:                  btnY[i],
+      upperBtnId:         (i - 1 + N) % N,
+      lowerBtnId:         (i + 1) % N,
+      leftBtnId:          i,
+      rightBtnId:         i,
+      normalStartObjId:   i * 3,      normalEndObjId: i * 3,      normalRepeat: false,
+      selectedSoundId:    0,
+      selStartObjId:      i * 3 + 1,  selEndObjId: i * 3 + 1,  selRepeat: false,
+      activatedSoundId:   0,
+      actStartObjId:      i * 3 + 2,  actEndObjId: i * 3 + 2,
+      navCmds: [buildNavCmd('PLAY_PL', pl)],
+    }],
+  }));
+
+  // ODS objects: 3 per button
+  const objects = [];
+  for (let i = 0; i < N; i++) {
+    objects.push({ objectId: i * 3,     version: 0, width: BTN_W, height: BTN_H, pixels: bitmaps[i].normal    });
+    objects.push({ objectId: i * 3 + 1, version: 0, width: BTN_W, height: BTN_H, pixels: bitmaps[i].selected  });
+    objects.push({ objectId: i * 3 + 2, version: 0, width: BTN_W, height: BTN_H, pixels: bitmaps[i].activated });
+  }
 
   return buildIGDisplaySet({
     composition: {
-      videoWidth,
-      videoHeight,
-      frameRate:        0x40,  // 24fps
+      videoWidth, videoHeight,
+      frameRate:        0x40,   // 24fps
       compositionNumber: 0,
-      compositionState:  2,    // epoch_start (fresh display set)
-      streamModel:       false, // ODS in same stream as ICS
-      uiModel:           false, // always-on (not popup)
-      userTimeoutMs:     0,    // no timeout
+      compositionState:  2,     // epoch_start
+      streamModel:       false,
+      uiModel:           false,
+      userTimeoutMs:     0,
       pages: [{
-        id:      0,
-        version: 0,
-        uoMask:  Buffer.alloc(8),  // all UO flags enabled (0 = allow)
-        animationFrameRateCode:       0,
-        defaultSelectedButtonIdRef:   0,   // start with btn1 selected
-        defaultActivatedButtonIdRef:  0xFFFF,
+        id: 0, version: 0,
+        uoMask: Buffer.alloc(8),
+        animationFrameRateCode:      0,
+        defaultSelectedButtonIdRef:  0,
+        defaultActivatedButtonIdRef: 0xFFFF,
         paletteIdRef: 0,
-        bogs: [
-          // BOG 0: Episode 1 button
-          {
-            defaultValidButtonIdRef: 0,
-            buttons: [{
-              id:                 0,
-              numericSelectValue: 1,
-              autoActionFlag:     false,
-              x:                  BTN1_X,
-              y:                  BTN1_Y,
-              upperBtnId:         1,     // wrap around to btn2
-              lowerBtnId:         1,     // down → btn2
-              leftBtnId:          0,     // stay
-              rightBtnId:         0,     // stay
-              normalStartObjId:   0,  normalEndObjId: 0,  normalRepeat: false,
-              selectedSoundId:    0,
-              selStartObjId:      1,  selEndObjId: 1,  selRepeat: false,
-              activatedSoundId:   0,
-              actStartObjId:      2,  actEndObjId: 2,
-              navCmds: [cmd1],
-            }],
-          },
-          // BOG 1: Episode 2 button
-          {
-            defaultValidButtonIdRef: 1,
-            buttons: [{
-              id:                 1,
-              numericSelectValue: 2,
-              autoActionFlag:     false,
-              x:                  BTN2_X,
-              y:                  BTN2_Y,
-              upperBtnId:         0,     // up → btn1
-              lowerBtnId:         0,     // wrap around to btn1
-              leftBtnId:          1,     // stay
-              rightBtnId:         1,     // stay
-              normalStartObjId:   3,  normalEndObjId: 3,  normalRepeat: false,
-              selectedSoundId:    0,
-              selStartObjId:      4,  selEndObjId: 4,  selRepeat: false,
-              activatedSoundId:   0,
-              actStartObjId:      5,  actEndObjId: 5,
-              navCmds: [cmd2],
-            }],
-          },
-        ],
+        bogs,
       }],
     },
     palette: { paletteId: 0, version: 0, entries: PALETTE },
-    windows: [
-      { id: 0, x: BTN1_X, y: BTN1_Y, width: BTN_W, height: BTN_H },
-      { id: 1, x: BTN2_X, y: BTN2_Y, width: BTN_W, height: BTN_H },
-    ],
-    objects: [
-      { objectId: 0, version: 0, width: BTN_W, height: BTN_H, pixels: btn1Normal   },
-      { objectId: 1, version: 0, width: BTN_W, height: BTN_H, pixels: btn1Selected },
-      { objectId: 2, version: 0, width: BTN_W, height: BTN_H, pixels: btn1Activ    },
-      { objectId: 3, version: 0, width: BTN_W, height: BTN_H, pixels: btn2Normal   },
-      { objectId: 4, version: 0, width: BTN_W, height: BTN_H, pixels: btn2Selected },
-      { objectId: 5, version: 0, width: BTN_W, height: BTN_H, pixels: btn2Activ    },
-    ],
+    // Single window spanning all buttons (BD spec allows max 2 windows per page;
+    // one large window covering all buttons is the simplest valid choice for N≥3).
+    windows: [{ id: 0, x: btnX, y: topY, width: BTN_W, height: totalH }],
+    objects,
     pid: IG_PID,
     pts,
   });
