@@ -21,8 +21,10 @@ Disc Forge turns MKV files into fully-compliant BD-ROM ISOs with proper navigati
 - **ISO output** — mount and play in VLC, IINA, or any BD-capable software player
 - **Light and dark mode**
 
+**New in v1.10.0:**
+- **Interactive episode menu** — BD-ROM IG (Interactive Graphics) menu at disc boot; each episode gets a labeled button; supports 2–9 episodes with auto-centered layout; customizable button labels; text rendered via ffmpeg drawtext with bundled Inter font (SIL OFL)
+
 **Roadmap (not yet in a shipping release):**
-- Interactive Tier 2 menus with button-driven navigation
 - Complete subtitle pipeline (SRT/ASS/SUP/PGS conversion end-to-end)
 - Multi-disc projects (BD-50)
 

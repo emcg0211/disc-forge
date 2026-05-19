@@ -1,5 +1,27 @@
 # Changelog
 
+## v1.10.0 — 2026-05-19
+
+**Interactive BD-ROM episode menu (Tier 2 IG)**
+
+- BD-ROM Interactive Graphics (IG) episode menu at disc boot — each episode gets a labeled button rendered via ffmpeg drawtext
+- Supports 2–9 episodes; buttons auto-center vertically and horizontally on the 1920×1080 frame
+- Custom button labels configurable per-episode in the UI; falls back to "Play Episode N" if blank
+- Palette-indexed BD bitmap encoding with white border, orange selected state, dark blue normal state
+- Inter Regular font (SIL Open Font License) bundled at `src/assets/fonts/MenuFont.ttf`
+- Single WDS window covers all buttons (BD spec compliant: max 2 windows per page)
+- Circular up/down navigation between buttons; activation triggers PLAY_PL to the episode's playlist
+- UI: Title input, background color picker, background image picker, per-button color pickers (bg/text/selected), per-episode label inputs (auto-grow as titles are added)
+- Graceful fallback to plain-color buttons if ffmpeg or font is unavailable
+
+**Bug fixes from Tier 2 development**
+- Fixed IG PES PID from 0x1200 (PG/subtitle range) to 0x1400 (IG range) — libbluray routes by PID
+- Fixed PES data_alignment_indicator bit for IG stream
+- Fixed one-PES-per-segment discipline in IG display set builder
+- Fixed palette entry 3 transparency (was T=160 ≈ 63% transparent; changed to T=0 opaque dark blue)
+
+---
+
 ## v1.8.0 — 2026-05-18
 
 **Splash screen support (hardware-verified)**

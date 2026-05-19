@@ -27,3 +27,4 @@ ts/
 .vscode/
 .idea/
 *.zip
+tools/__pycache__/

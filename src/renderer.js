@@ -59,7 +59,7 @@ let state = {
   project: {
     title: '', description: '', discLabel: '',
     resolution: RESOLUTIONS[0], videoFormat: VIDEO_FMTS[0], outputDir: '', useSplash: false,
-    splashPngPath: null, splashDuration: 5, splashColor: '1a1a2e',
+    splashPngPath: null, splashDuration: 5, splashColor: '1a1a2e', useIGMenu: false,
     mainVideo: null,
     titles: [],   // additional video titles on the disc
     discSize: 'BD-25',
@@ -95,6 +95,12 @@ let state = {
       discTitleColor: '#dbb85a', discTitlePosition: 'top-center',
       // Animated background
       animatedBg: false, animationType: 'pan', // pan, pulse, particles
+    },
+    igMenuConfig: {
+      bgColor: '#1a1a2e', bgImagePath: null, title: '',
+      buttonLabels: [],
+      buttonBgColor: '#2a2a4a', buttonTextColor: '#ffffff',
+      buttonHighlightColor: '#ff8800', fontFamily: 'MenuFont',
     },
   },
   form: {
@@ -453,6 +459,8 @@ async function startBuild() {
       splashPngPath: p.splashPngPath || null,
       splashDuration: p.splashDuration || 5,
       splashColor: p.splashColor || '1a1a2e',
+      useIGMenu: p.useIGMenu || false,
+      igMenuConfig: p.igMenuConfig || {},
     });
   } else {
     appendLog(`[Renderer] Single-title routing → buildDisc`);
@@ -1145,6 +1153,49 @@ function pageProject(p) {
             <input type="checkbox" id="use-splash" ${p.useSplash ? 'checked' : ''} style="width:14px;height:14px">
             Add splash screen before playback
           </label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--text-secondary);margin-top:6px">
+            <input type="checkbox" id="use-ig-menu" ${p.useIGMenu ? 'checked' : ''} style="width:14px;height:14px">
+            Add interactive episode menu [experimental]
+          </label>
+          ${p.useIGMenu ? `
+          <div style="background:var(--bg-secondary);padding:10px 12px;border-radius:8px;margin-top:8px;display:flex;flex-direction:column;gap:8px">
+            <div style="display:flex;gap:10px;align-items:center">
+              <label style="font-size:12px;color:var(--text-secondary);min-width:52px">Title</label>
+              <input type="text" id="ig-menu-title" value="${esc(p.igMenuConfig?.title||'')}" placeholder="Menu title (optional)" style="flex:1;font-size:12px;padding:3px 8px;border-radius:4px;border:1px solid var(--border);background:var(--bg-primary);color:var(--text-primary)">
+            </div>
+            <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+              <label style="font-size:12px;color:var(--text-secondary);min-width:52px">Background</label>
+              <input type="color" id="ig-bg-color" value="${p.igMenuConfig?.bgColor||'#1a1a2e'}" style="width:36px;height:24px;cursor:pointer;border:none;border-radius:4px;padding:1px;background:none">
+              <button class="btn btn-ghost btn-xs" id="ig-pick-bg-image">${p.igMenuConfig?.bgImagePath ? esc(p.igMenuConfig.bgImagePath.split('/').pop()) : 'Pick BG image'}</button>
+              ${p.igMenuConfig?.bgImagePath ? '<button class="btn btn-ghost btn-xs" id="ig-clear-bg-image">&#x2715;</button>' : ''}
+            </div>
+            <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+              <label style="font-size:12px;color:var(--text-secondary);min-width:52px">Buttons</label>
+              <span style="font-size:11px;color:var(--text-tertiary)">BG</span>
+              <input type="color" id="ig-btn-bg" value="${p.igMenuConfig?.buttonBgColor||'#2a2a4a'}" style="width:30px;height:22px;cursor:pointer;border:none;border-radius:3px;padding:1px;background:none">
+              <span style="font-size:11px;color:var(--text-tertiary)">Text</span>
+              <input type="color" id="ig-btn-text" value="${p.igMenuConfig?.buttonTextColor||'#ffffff'}" style="width:30px;height:22px;cursor:pointer;border:none;border-radius:3px;padding:1px;background:none">
+              <span style="font-size:11px;color:var(--text-tertiary)">Selected</span>
+              <input type="color" id="ig-btn-hl" value="${p.igMenuConfig?.buttonHighlightColor||'#ff8800'}" style="width:30px;height:22px;cursor:pointer;border:none;border-radius:3px;padding:1px;background:none">
+            </div>
+            <div style="display:flex;flex-direction:column;gap:4px">
+              <label style="font-size:12px;color:var(--text-secondary);margin-bottom:2px">Button Labels</label>
+              ${(() => {
+                const _igTitles = [
+                  ...(p.mainVideo ? [p.mainVideo] : []),
+                  ...(p.titles || []).map(t => t.file)
+                ];
+                if (_igTitles.length === 0) return '<span style="font-size:11px;color:var(--text-tertiary)">Add videos above to configure labels</span>';
+                return _igTitles.map((f, i) => {
+                  const val = esc((p.igMenuConfig?.buttonLabels||[])[i]||'');
+                  return '<div style="display:flex;gap:8px;align-items:center">' +
+                    '<span style="font-size:11px;color:var(--text-tertiary);min-width:60px">Ep ' + (i+1) + '</span>' +
+                    '<input type="text" class="ig-label-input" data-idx="' + i + '" value="' + val + '" placeholder="Play Episode ' + (i+1) + '" style="flex:1;font-size:12px;padding:3px 8px;border-radius:4px;border:1px solid var(--border);background:var(--bg-primary);color:var(--text-primary)">' +
+                    '</div>';
+                }).join('');
+              })()}
+            </div>
+          </div>` : ''}
           ${p.useSplash ? `
           <div style="margin-top:8px;padding:10px 12px;background:var(--bg-secondary);border-radius:8px;display:flex;flex-direction:column;gap:10px">
             <div style="display:flex;gap:10px;align-items:center">
@@ -2301,6 +2352,25 @@ function attachListeners() {
   document.getElementById('force-transcode')?.addEventListener('change', e => setPrj({ forceTranscode: e.target.checked }));
   document.getElementById('proj-vcodec')?.addEventListener('change',e => setPrj({ videoFormat: e.target.value }));
   document.getElementById('use-splash')?.addEventListener('change',  e => setPrj({ useSplash: e.target.checked }));
+  document.getElementById('use-ig-menu')?.addEventListener('change', e => setPrj({ useIGMenu: e.target.checked }));
+  document.getElementById('ig-menu-title')?.addEventListener('input', e => setPrj({ igMenuConfig: { ...state.project.igMenuConfig, title: e.target.value } }));
+  document.getElementById('ig-bg-color')?.addEventListener('input', e => setPrj({ igMenuConfig: { ...state.project.igMenuConfig, bgColor: e.target.value } }));
+  document.getElementById('ig-pick-bg-image')?.addEventListener('click', async () => {
+    const r = await pickFile([{ name: 'Image', extensions: ['png', 'jpg', 'jpeg'] }]);
+    if (r) setPrj({ igMenuConfig: { ...state.project.igMenuConfig, bgImagePath: r } });
+  });
+  document.getElementById('ig-clear-bg-image')?.addEventListener('click', () => setPrj({ igMenuConfig: { ...state.project.igMenuConfig, bgImagePath: null } }));
+  document.getElementById('ig-btn-bg')?.addEventListener('input', e => setPrj({ igMenuConfig: { ...state.project.igMenuConfig, buttonBgColor: e.target.value } }));
+  document.getElementById('ig-btn-text')?.addEventListener('input', e => setPrj({ igMenuConfig: { ...state.project.igMenuConfig, buttonTextColor: e.target.value } }));
+  document.getElementById('ig-btn-hl')?.addEventListener('input', e => setPrj({ igMenuConfig: { ...state.project.igMenuConfig, buttonHighlightColor: e.target.value } }));
+  document.querySelectorAll('.ig-label-input').forEach(el => {
+    el.addEventListener('input', e => {
+      const idx = parseInt(e.target.dataset.idx, 10);
+      const labels = [...(state.project.igMenuConfig?.buttonLabels || [])];
+      labels[idx] = e.target.value;
+      setPrj({ igMenuConfig: { ...state.project.igMenuConfig, buttonLabels: labels } });
+    });
+  });
   document.getElementById('splash-duration')?.addEventListener('change', e => setPrj({ splashDuration: parseInt(e.target.value, 10) }));
   document.getElementById('splash-color')?.addEventListener('input',   e => setPrj({ splashColor: e.target.value.slice(1) }));
   document.getElementById('pick-splash-png')?.addEventListener('click', async () => {
