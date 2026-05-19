@@ -259,6 +259,39 @@ function buildMenuDisplaySet({ videoWidth = 1920, videoHeight = 1080, playlists 
 }
 
 /**
+ * Extract the first video PES PTS from a BD m2ts buffer.
+ *
+ * Scans for the first PID=0x1011 (HDMV video) PUSI packet that has a PTS.
+ * This PTS value equals the MPLS in_pts (in_time << 1 in 90kHz) used by
+ * libbluray's m2ts_filter, so it is the minimum value an IG PES PTS must
+ * meet to pass the filter's `pts >= in_pts` check.
+ *
+ * @param {Buffer} m2tsBuf - 192-byte BD m2ts packets
+ * @returns {number} PTS in 90kHz ticks, or 54000000 as fallback
+ */
+function extractFirstVideoPTS(m2tsBuf) {
+  const VIDEO_PID = 0x1011;
+  for (let i = 0; i + 192 <= m2tsBuf.length; i += 192) {
+    const pkt = m2tsBuf.slice(i + 4, i + 192);
+    if (pkt[0] !== 0x47) continue;
+    const pid = ((pkt[1] & 0x1f) << 8) | pkt[2];
+    if (pid !== VIDEO_PID) continue;
+    if (!(pkt[1] & 0x40)) continue;                      // not PUSI
+    const payloadStart = (pkt[3] & 0x20) ? 5 + pkt[4] : 4;
+    const pes = pkt.slice(payloadStart);
+    if (pes[0] !== 0 || pes[1] !== 0 || pes[2] !== 1) continue;
+    if (!(pes[7] & 0x80)) continue;                      // no PTS flag
+    const p = pes.slice(9, 14);
+    return ((p[0] & 0x0e) * (1 << 29)) +
+           (p[1] * (1 << 22)) +
+           ((p[2] & 0xfe) * (1 << 14)) +
+           (p[3] * (1 << 7)) +
+           ((p[4] & 0xfe) >> 1);
+  }
+  return 54000000;  // fallback: tsMuxeR default for 600s clip start
+}
+
+/**
  * Convert 188-byte TS packets to 192-byte BD m2ts format.
  * BD m2ts prepends a 4-byte arrival timestamp (in 27MHz ticks) to each packet.
  *
@@ -477,6 +510,7 @@ function patchMplsClipName(mplsBuf, name) {
 
 module.exports = {
   buildMenuDisplaySet,
+  extractFirstVideoPTS,
   renderButtonBitmap,
   renderButtonPixels,
   convertTsBdFormat,
@@ -485,7 +519,7 @@ module.exports = {
   patchMplsForIG,
   patchMplsClipName,
   IG_PID,
-  BTN_W, BTN_H, BTN1_X, BTN1_Y, BTN2_X, BTN2_Y,
+  BTN_W, BTN_H,
   PALETTE,
   ENTRY_RGB,
   FONT_PATH,

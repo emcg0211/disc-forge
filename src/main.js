@@ -3560,7 +3560,8 @@ function fixMultiTitleNavigationForEpisodes(bdFolder, numEpisodes, ep1TsMuxerPre
 //   Button 2 → PLAY_PL(2)  [Episode 2, or EP1 again for single-title]
 
 async function addMenuToDisc(bdFolder, numEpisodes, workDir, igMenuConfig = {}) {
-  const { patchClpiForIG, patchMplsForIG, patchMplsClipName, buildMenuDisplaySet, injectIGIntoM2ts } =
+  const { patchClpiForIG, patchMplsForIG, patchMplsClipName, buildMenuDisplaySet,
+          injectIGIntoM2ts, extractFirstVideoPTS } =
     require('./lib/menu-builder');
 
   const menuDir  = path.join(workDir, 'menu_tmp');
@@ -3628,13 +3629,21 @@ async function addMenuToDisc(bdFolder, numEpisodes, workDir, igMenuConfig = {}) 
     (configLabels[i] && configLabels[i].trim()) ? configLabels[i].trim() : `Play Episode ${i + 1}`
   );
   const playlists = Array.from({ length: numEpisodes }, (_, i) => i + 1);
+
+  // Read video m2ts first so we can extract its PTS.
+  // IG PES PTS must be >= the clip's in_pts (in_time<<1) for libbluray's
+  // m2ts_filter to pass IG packets through. The first video PTS equals in_pts,
+  // so using it as the IG PTS is the minimal correct value.
+  const videoM2ts = fs.readFileSync(srcM2ts);
+  const videoPts  = extractFirstVideoPTS(videoM2ts);
+  sendLog(`[Menu] Video PTS extracted: ${videoPts} (used as IG PES PTS)`);
+
   const igTs = buildMenuDisplaySet({
     playlists,
-    pts: 54009000,
+    pts: videoPts,
     labels:     menuLabels,
     ffmpegPath: TOOLS.ffmpeg,
   });
-  const videoM2ts = fs.readFileSync(srcM2ts);
   const menuM2ts = injectIGIntoM2ts(videoM2ts, igTs);
   sendLog(`[Menu] IG injected: ${igTs.length} bytes TS → m2ts now ${menuM2ts.length} bytes`);
 

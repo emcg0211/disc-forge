@@ -943,7 +943,7 @@ function titlebarHTML(tools) {
     <div class="titlebar-brand">
       <div class="titlebar-logo">💿</div>
       <span class="titlebar-name">Disc Forge</span>
-      <span class="titlebar-version">1.5.2</span>
+      <span class="titlebar-version">1.10.2</span>
     </div>
     <div class="titlebar-spacer"></div>
     <div class="titlebar-tools">
@@ -2226,6 +2226,10 @@ function welcomeModalHTML() {
 // ── About Modal ───────────────────────────────────────────────────────────────
 function aboutModalHTML() {
   const versions = [
+    { v:'1.10.2', notes:['IG menu button rendering fix: dynamic PTS extraction from video m2ts ensures IG PES PTS >= MPLS in_pts, passing libbluray m2ts_filter', 'Replaces hardcoded fallback PTS with per-disc extracted value for robustness'] },
+    { v:'1.10.0', notes:['Tier 2 IG menus: N-button auto-layout (2–9 episodes)', 'Text rendering on buttons via FFmpeg drawtext (SIL Inter font)', 'UI customization panel: button labels, font size, colors'] },
+    { v:'1.9.1', notes:['Splash screen fix: both CLPI and MPLS patched for proper first-frame display', 'UI polish for splash/menu toggle'] },
+    { v:'1.9.0', notes:['Multi-title episode disc support', 'Separate IPC handler and per-episode tsMuxeR', 'PGS subtitle pipeline', 'IG encoder foundation (59 unit tests)'] },
     { v:'1.5.2', notes:['Video Quality Mode — per-title quality selector: Passthrough (stream copy), High Quality CRF 18, Balanced CRF 20, Compact CRF 23', 'CRF re-encode produces BD-compliant H.264 High Profile output', 'Size estimates update per-title based on selected quality multiplier', 'CRF encode progress shows fps, frame count, and estimated time remaining', 'Apply-to-all quality button for quick global quality changes', 'Quality badge per title: green Copy / yellow CRF N'] },
     { v:'1.5.1', notes:['Accurate disc size estimation: video bitrate + AC3 audio + subtitle overhead via ffprobe', 'Elapsed timer stops when build completes', 'ISO file size shown prominently in success screen', 'Build steps show output file size on completion', 'Per-title ETA based on previous title durations', 'Disc capacity warning if estimate exceeds BD-25 or BD-50', 'Disc capacity fill bar added to Project tab'] },
     { v:'1.5', notes:['Disc burning with real-time progress (growisofs + hdiutil fallback)', 'Chapter thumbnails — auto-generate 160×90 previews per chapter via FFmpeg', 'Passthrough mode — skip FFmpeg transcode for BD-compatible H.264/HEVC titles', 'BD compatibility detection badge per title (Passthrough / Transcode)', 'Enhanced menu customization: 6 new themes (Minimal, Cinema, Vintage, Neon, Grid, Sidebar)', 'Gradient background with direction selector', 'Background image blur/brightness/contrast controls', 'Font size sliders for title (24–96px) and episodes (12–36px)', 'Font weight & letter spacing', 'Text shadow with colour, blur, and X/Y offset', 'Button border radius & hover effects (highlight, scale, underline, glow)', 'Episode spacing & number toggle', 'Disc title overlay with position selector', 'Animated background (pan, pulse, particles)'] },
@@ -2248,7 +2252,7 @@ function aboutModalHTML() {
     '<div style="text-align:center;margin-bottom:16px">' +
     '<div style="font-size:40px;margin-bottom:6px">💿</div>' +
     '<div class="modal-title" style="font-size:20px">Disc Forge</div>' +
-    '<div style="font-size:12px;color:var(--gold);font-weight:600;margin-bottom:4px">Version 1.5.2</div>' +
+    '<div style="font-size:12px;color:var(--gold);font-weight:600;margin-bottom:4px">Version 1.10.2</div>' +
     '<div style="font-size:11px;color:var(--text-tertiary)">Professional Blu-ray authoring for macOS</div>' +
     '</div>' +
     '<div style="max-height:320px;overflow-y:auto;border-top:1px solid var(--border-dim);border-bottom:1px solid var(--border-dim);padding:12px 0;margin-bottom:14px">' +
