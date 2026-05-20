@@ -508,6 +508,66 @@ function patchMplsClipName(mplsBuf, name) {
   return newBuf;
 }
 
+/**
+ * Find the BD packet index immediately before the first video PES whose PTS
+ * is >= targetPts. Used to interleave IG packets at the correct position in
+ * a high-bitrate stream so GC fires after the vout is initialized.
+ *
+ * @param {Buffer} m2tsBuf   - 192-byte BD m2ts stream
+ * @param {number} targetPts - PTS threshold in 90kHz ticks
+ * @returns {number} BD packet index; falls back to 90% of total if not found
+ */
+function findPtsInsertionPoint(m2tsBuf, targetPts) {
+  const VIDEO_PID = 0x1011;
+  const numPkts   = Math.floor(m2tsBuf.length / 192);
+  for (let i = 0; i < numPkts; i++) {
+    const pkt = m2tsBuf.slice(i * 192 + 4, i * 192 + 192);
+    if (pkt[0] !== 0x47) continue;
+    const pid = ((pkt[1] & 0x1f) << 8) | pkt[2];
+    if (pid !== VIDEO_PID) continue;
+    if (!(pkt[1] & 0x40)) continue;                      // not PUSI
+    const payloadStart = (pkt[3] & 0x20) ? 5 + pkt[4] : 4;
+    const pes = pkt.slice(payloadStart);
+    if (pes[0] !== 0 || pes[1] !== 0 || pes[2] !== 1) continue;
+    if (!(pes[7] & 0x80)) continue;                      // no PTS flag
+    const p = pes.slice(9, 14);
+    const pts = ((p[0] & 0x0e) * (1 << 29)) +
+                (p[1] * (1 << 22)) +
+                ((p[2] & 0xfe) * (1 << 14)) +
+                (p[3] * (1 << 7)) +
+                ((p[4] & 0xfe) >> 1);
+    if (pts >= targetPts) return i;
+  }
+  return Math.floor(numPkts * 0.9);
+}
+
+/**
+ * Set still_mode=2 (infinite still) on every PlayItem in a menu MPLS.
+ * With infinite still the player holds the last frame indefinitely instead
+ * of firing End-of-title, which would call blurayReleaseVout and destroy
+ * the IG overlay before any video frame is displayed.
+ *
+ * PlayItem byte layout (BDMV spec §5.3.4):
+ *   piOff+0-1  : length of PlayItem data (not counting these 2 bytes)
+ *   piOff+2-6  : ClipInformationFileName (5 chars)
+ *   piOff+31   : still_mode  (0=none, 1=finite, 2=infinite)
+ *   piOff+32-33: still_time  (0 when still_mode==2)
+ */
+function patchMplsForStill(mplsBuf) {
+  const plStart      = mplsBuf.readUInt32BE(8);
+  const numPlayItems = mplsBuf.readUInt16BE(plStart + 6);
+  const newBuf       = Buffer.from(mplsBuf);
+
+  let piOff = plStart + 10;
+  for (let i = 0; i < numPlayItems; i++) {
+    const piLen = newBuf.readUInt16BE(piOff);
+    newBuf[piOff + 31] = 0x02;
+    newBuf.writeUInt16BE(0x0000, piOff + 32);
+    piOff += 2 + piLen;
+  }
+  return newBuf;
+}
+
 module.exports = {
   buildMenuDisplaySet,
   extractFirstVideoPTS,
@@ -518,6 +578,8 @@ module.exports = {
   patchClpiForIG,
   patchMplsForIG,
   patchMplsClipName,
+  patchMplsForStill,
+  findPtsInsertionPoint,
   IG_PID,
   BTN_W, BTN_H,
   PALETTE,

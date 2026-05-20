@@ -3560,106 +3560,127 @@ function fixMultiTitleNavigationForEpisodes(bdFolder, numEpisodes, ep1TsMuxerPre
 //   Button 2 → PLAY_PL(2)  [Episode 2, or EP1 again for single-title]
 
 async function addMenuToDisc(bdFolder, numEpisodes, workDir, igMenuConfig = {}) {
-  const { patchClpiForIG, patchMplsForIG, patchMplsClipName, buildMenuDisplaySet,
-          injectIGIntoM2ts, extractFirstVideoPTS } =
+  // Two-clip preload strategy (v1.10.3):
+  //   00098.mpls → 1s preload clip (no IG)  — initializes VLC vout before menu fires
+  //   00099.mpls → 5s menu clip  (with IG)  — GC fires with vout ready → buttons visible
+  //   MovieObject obj[2]: PLAY_PL(98) → PLAY_PL(99) → JUMP_OBJECT(2) (safety)
+  //
+  // Root cause: VLC's libbluray module calls blurayDrawOverlay before the vout exists.
+  // The preload clip initializes the vout so that when 00099 starts and the GC fires,
+  // p_sys->p_vout is non-NULL and the overlay is rendered correctly.
+  const { patchClpiForIG, patchMplsForIG, patchMplsClipName, patchMplsForStill,
+          buildMenuDisplaySet, injectIGIntoM2ts, extractFirstVideoPTS } =
     require('./lib/menu-builder');
 
-  const menuDir  = path.join(workDir, 'menu_tmp');
-  const menuBdmv = path.join(menuDir, 'BDMV_MENU');
-  fs.mkdirSync(menuDir,  { recursive: true });
+  const menuTmpDir  = path.join(workDir, 'menu_tmp');
+  const preTmpDir   = path.join(workDir, 'pre_tmp');
+  const menuBdmv    = path.join(menuTmpDir, 'BDMV_MENU');
+  const preBdmv     = path.join(preTmpDir,  'BDMV_PRE');
   fs.mkdirSync(menuBdmv, { recursive: true });
+  fs.mkdirSync(preBdmv,  { recursive: true });
 
-  // ── Step 1: Generate 5s solid-color menu background video (raw h264 ES) ──
-  // tsMuxeR requires raw elementary stream for non-TS inputs (no track= needed).
-  const menuH264 = path.join(menuDir, 'menu_bg.h264');
-  sendLog('[Menu] Generating 5s menu background video');
+  // ── Step 1: Generate clips (1s preload + 5s menu) ─────────────────────────
+  const preH264  = path.join(preTmpDir,  'pre_bg.h264');
+  const menuH264 = path.join(menuTmpDir, 'menu_bg.h264');
+  const ffArgs = (dur) => [
+    '-y', '-f', 'lavfi',
+    '-i', `color=c=0x1a1a2e:size=1920x1080:rate=24`,
+    '-t', String(dur),
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+    '-preset', 'ultrafast', '-crf', '28',
+  ];
+
+  sendLog('[Menu] Generating preload clip (1s) and menu clip (5s)');
   await new Promise((resolve, reject) => {
-    const ff = spawn(TOOLS.ffmpeg, [
-      '-y', '-f', 'lavfi',
-      '-i', 'color=c=0x1a1a2e:size=1920x1080:rate=24',
-      '-t', '5',
-      '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
-      '-preset', 'ultrafast', '-crf', '28',
-      menuH264,
-    ]);
+    const ff = spawn(TOOLS.ffmpeg, [...ffArgs(1), preH264]);
+    ff.stderr.on('data', () => {});
+    ff.on('error', reject);
+    ff.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg preload exit ${code}`)));
+  });
+  await new Promise((resolve, reject) => {
+    const ff = spawn(TOOLS.ffmpeg, [...ffArgs(5), menuH264]);
     ff.stderr.on('data', () => {});
     ff.on('error', reject);
     ff.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg menu bg exit ${code}`)));
   });
 
-  // ── Step 2: Run tsMuxeR to get BDMV structure for menu clip ───────────────
-  const menuMeta = path.join(menuDir, 'menu.meta');
-  fs.writeFileSync(menuMeta,
-    `MUXOPT --no-pcr-on-video-pid --new-audio-pes --blu-ray\n` +
-    `V_MPEG4/ISO/AVC, "${tsPath(menuH264)}", level=4.1, insertSEI, contSPS, lang=und, fps=24\n`
-  );
-  sendLog('[Menu] Running tsMuxeR for menu clip');
-  await new Promise((resolve, reject) => {
-    const proc = spawn(TOOLS.tsmuxer, [menuMeta, menuBdmv]);
-    proc.on('error', reject);
-    proc.on('close', code => code === 0 ? resolve() : reject(new Error(`tsMuxeR menu exit ${code}`)));
-  });
+  // ── Step 2: tsMuxeR for preload and menu clips ────────────────────────────
+  async function runTsMuxer(h264, outBdmv, label) {
+    const meta = h264 + '.meta';
+    fs.writeFileSync(meta,
+      `MUXOPT --no-pcr-on-video-pid --new-audio-pes --blu-ray\n` +
+      `V_MPEG4/ISO/AVC, "${tsPath(h264)}", level=4.1, insertSEI, contSPS, lang=und, fps=24\n`
+    );
+    sendLog(`[Menu] Running tsMuxeR for ${label} clip`);
+    await new Promise((resolve, reject) => {
+      const proc = spawn(TOOLS.tsmuxer, [meta, outBdmv]);
+      proc.on('error', reject);
+      proc.on('close', code => code === 0 ? resolve() : reject(new Error(`tsMuxeR ${label} exit ${code}`)));
+    });
+    const streamDir   = path.join(outBdmv, 'BDMV', 'STREAM');
+    const clipinfDir  = path.join(outBdmv, 'BDMV', 'CLIPINF');
+    const playlistDir = path.join(outBdmv, 'BDMV', 'PLAYLIST');
+    const produced = fs.readdirSync(streamDir).filter(f => f.endsWith('.m2ts')).sort();
+    if (produced.length === 0) throw new Error(`[Menu] tsMuxeR produced no m2ts for ${label}`);
+    const base = produced[0].replace('.m2ts', '');
+    return {
+      m2ts: path.join(streamDir,   `${base}.m2ts`),
+      clpi: path.join(clipinfDir,  `${base}.clpi`),
+      mpls: path.join(playlistDir, `${base}.mpls`),
+    };
+  }
 
-  // tsMuxeR produces 00000.* (or 00001.* depending on version); find the video file
-  const streamDir = path.join(menuBdmv, 'BDMV', 'STREAM');
-  const clipinfDir = path.join(menuBdmv, 'BDMV', 'CLIPINF');
-  const playlistDir = path.join(menuBdmv, 'BDMV', 'PLAYLIST');
-  const produced = fs.readdirSync(streamDir).filter(f => f.endsWith('.m2ts')).sort();
-  if (produced.length === 0) throw new Error('[Menu] tsMuxeR produced no m2ts for menu clip');
-  const base = produced[0].replace('.m2ts', '');  // e.g. "00000" or "00001"
-  sendLog(`[Menu] tsMuxeR menu clip base: ${base}`);
+  const prePaths  = await runTsMuxer(preH264,  preBdmv,  'preload');
+  const menuPaths = await runTsMuxer(menuH264, menuBdmv, 'menu');
 
-  const srcM2ts   = path.join(streamDir,   `${base}.m2ts`);
-  const srcClpi   = path.join(clipinfDir,  `${base}.clpi`);
-  const srcMpls   = path.join(playlistDir, `${base}.mpls`);
+  // ── Step 3: Patch preload MPLS (clip rename only, no IG, no still) ────────
+  const renamedPreMpls = patchMplsClipName(fs.readFileSync(prePaths.mpls), '00098');
 
-  // ── Step 3: Patch MPLS clip reference and add IG stream declarations ───────
-  const rawMpls = fs.readFileSync(srcMpls);
-  const renamedMpls = patchMplsClipName(rawMpls, '00099');
-  const igMpls = patchMplsForIG(renamedMpls);
+  // ── Step 4: Patch menu MPLS (clip rename + IG + infinite still) ───────────
+  const renamedMenuMpls = patchMplsClipName(fs.readFileSync(menuPaths.mpls), '00099');
+  const igMpls          = patchMplsForStill(patchMplsForIG(renamedMenuMpls));
 
-  // ── Step 4: Patch CLPI to add IG stream declaration ───────────────────────
-  const rawClpi = fs.readFileSync(srcClpi);
-  const igClpi  = patchClpiForIG(rawClpi);
+  // ── Step 5: Patch menu CLPI to declare IG stream ─────────────────────────
+  const igClpi = patchClpiForIG(fs.readFileSync(menuPaths.clpi));
   if (!igClpi) throw new Error('[Menu] patchClpiForIG failed — unexpected CLPI structure');
 
-  // ── Step 5: Build IG display set and inject into m2ts ─────────────────────
+  // ── Step 6: Build IG display set and inject into menu m2ts ───────────────
   const configLabels = igMenuConfig.buttonLabels || [];
   const menuLabels = Array.from({ length: numEpisodes }, (_, i) =>
     (configLabels[i] && configLabels[i].trim()) ? configLabels[i].trim() : `Play Episode ${i + 1}`
   );
   const playlists = Array.from({ length: numEpisodes }, (_, i) => i + 1);
 
-  // Read video m2ts first so we can extract its PTS.
-  // IG PES PTS must be >= the clip's in_pts (in_time<<1) for libbluray's
-  // m2ts_filter to pass IG packets through. The first video PTS equals in_pts,
-  // so using it as the IG PTS is the minimal correct value.
-  const videoM2ts = fs.readFileSync(srcM2ts);
+  const videoM2ts = fs.readFileSync(menuPaths.m2ts);
   const videoPts  = extractFirstVideoPTS(videoM2ts);
-  sendLog(`[Menu] Video PTS extracted: ${videoPts} (used as IG PES PTS)`);
+  // Fire IG immediately when 00099 starts — vout is already initialized from preload.
+  sendLog(`[Menu] Video PTS: ${videoPts}`);
 
-  const igTs = buildMenuDisplaySet({
+  const igTs     = buildMenuDisplaySet({
     playlists,
-    pts: videoPts,
+    pts:        videoPts,
     labels:     menuLabels,
     ffmpegPath: TOOLS.ffmpeg,
   });
   const menuM2ts = injectIGIntoM2ts(videoM2ts, igTs);
   sendLog(`[Menu] IG injected: ${igTs.length} bytes TS → m2ts now ${menuM2ts.length} bytes`);
 
-  // ── Step 6: Install 00099.* into main disc ─────────────────────────────────
+  // ── Step 7: Install 00098.* (preload) and 00099.* (menu) ─────────────────
   const destStream   = path.join(bdFolder, 'BDMV', 'STREAM');
   const destClipinf  = path.join(bdFolder, 'BDMV', 'CLIPINF');
   const destPlaylist = path.join(bdFolder, 'BDMV', 'PLAYLIST');
 
+  fs.writeFileSync(path.join(destStream,   '00098.m2ts'), fs.readFileSync(prePaths.m2ts));
+  fs.writeFileSync(path.join(destClipinf,  '00098.clpi'), fs.readFileSync(prePaths.clpi));
+  fs.writeFileSync(path.join(destPlaylist, '00098.mpls'), renamedPreMpls);
+  sendLog('[Menu] Installed preload 00098.m2ts / 00098.clpi / 00098.mpls');
+
   fs.writeFileSync(path.join(destStream,   '00099.m2ts'), menuM2ts);
   fs.writeFileSync(path.join(destClipinf,  '00099.clpi'), igClpi);
   fs.writeFileSync(path.join(destPlaylist, '00099.mpls'), igMpls);
-  sendLog('[Menu] Installed 00099.m2ts / 00099.clpi / 00099.mpls');
+  sendLog('[Menu] Installed menu 00099.m2ts / 00099.clpi / 00099.mpls');
 
-  // ── Step 7: Patch MovieObject obj[2] → PLAY_PL(99) ────────────────────────
-  // fixMultiTitleNavigationForEpisodes set obj[2] last cmd to PLAY_PL(1).
-  // We change playlist ID from 1 to 99 (menu playlist).
+  // ── Step 8: Patch MovieObject obj[2] → PLAY_PL(98) → PLAY_PL(99) → JUMP_OBJECT(2)
   const mobjPath = path.join(bdFolder, 'BDMV', 'MovieObject.bdmv');
   const mobjBuf  = Buffer.from(fs.readFileSync(mobjPath));
 
@@ -3680,18 +3701,43 @@ async function addMenuToDisc(bdFolder, numEpisodes, workDir, igMenuConfig = {}) 
     return;
   }
 
-  const numCmds2  = mobjBuf.readUInt16BE(obj2Pos + 2);
+  const numCmds2   = mobjBuf.readUInt16BE(obj2Pos + 2);
   const lastCmdOff = obj2Pos + 4 + (numCmds2 - 1) * 12;
   const lastOpcode = mobjBuf.readUInt32BE(lastCmdOff);
 
   if (lastOpcode !== 0x22800000) {
-    sendLog(`[Menu] WARNING: obj[2] last cmd opcode 0x${lastOpcode.toString(16)} is not PLAY_PL — skipping MovieObject patch`);
+    sendLog(`[Menu] WARNING: obj[2] last cmd opcode 0x${lastOpcode.toString(16)} is not PLAY_PL — skipping patch`);
     return;
   }
 
-  mobjBuf.writeUInt32BE(99, lastCmdOff + 4);  // change playlist ID → 99
-  fs.writeFileSync(mobjPath, mobjBuf);
-  sendLog('[Menu] MovieObject obj[2] patched: PLAY_PL(1) → PLAY_PL(99)');
+  // Change existing PLAY_PL to PLAY_PL(98) (preload — vout initializer)
+  mobjBuf.writeUInt32BE(98, lastCmdOff + 4);
+
+  // Add PLAY_PL(99) (menu — GC fires with vout ready)
+  const menuPlayCmd = Buffer.allocUnsafe(12);
+  menuPlayCmd.writeUInt32BE(0x22800000, 0);
+  menuPlayCmd.writeUInt32BE(99,          4);
+  menuPlayCmd.writeUInt32BE(0,           8);
+
+  // Add JUMP_OBJECT(2) (safety: loops back if still_mode ever ends)
+  const loopCmd = Buffer.allocUnsafe(12);
+  loopCmd.writeUInt32BE(0x21800000, 0);
+  loopCmd.writeUInt32BE(2,          4);
+  loopCmd.writeUInt32BE(0,          8);
+
+  const mobjInsertAt = lastCmdOff + 12;
+  const newMobjBuf   = Buffer.concat([
+    mobjBuf.slice(0, mobjInsertAt),
+    menuPlayCmd,
+    loopCmd,
+    mobjBuf.slice(mobjInsertAt),
+  ]);
+
+  newMobjBuf.writeUInt16BE(numCmds2 + 2, obj2Pos + 2);
+  newMobjBuf.writeUInt32BE(mobjBuf.readUInt32BE(MOBJ_STRUCT_OFF) + 24, MOBJ_STRUCT_OFF);
+
+  fs.writeFileSync(mobjPath, newMobjBuf);
+  sendLog(`[Menu] MovieObject obj[2]: PLAY_PL(98)→PLAY_PL(99)→JUMP_OBJECT(2) (${numCmds2}→${numCmds2+2} cmds)`);
 }
 
 // ── IPC: build multi-title disc ───────────────────────────────────────────────

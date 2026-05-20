@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.10.3 — 2026-05-19
+
+**Two-clip preload strategy for IG menu (VLC vout timing fix)**
+
+- 00098.mpls: 1s preload clip (no IG) — plays first to initialize VLC vout before menu fires
+- 00099.mpls: 5s menu clip (with IG, still_mode=2) — GC fires with vout already ready, buttons visible
+- MovieObject obj[2] now chains: PLAY_PL(98) → PLAY_PL(99) → JUMP_OBJECT(2)
+- still_mode=2 on 00099 provides persistent menu on hardware BD players
+- Root cause identified: VLC macOS calls `blurayReleaseVout` during every clip transition via BD_EVENT_PLAYITEM_CHANGE; disc structure and IG rendering confirmed correct via libbluray GC debug log
+
+---
+
 ## v1.10.0 — 2026-05-19
 
 **Interactive BD-ROM episode menu (Tier 2 IG)**
