@@ -550,8 +550,15 @@ function findPtsInsertionPoint(m2tsBuf, targetPts) {
  * PlayItem byte layout (BDMV spec §5.3.4):
  *   piOff+0-1  : length of PlayItem data (not counting these 2 bytes)
  *   piOff+2-6  : ClipInformationFileName (5 chars)
- *   piOff+31   : still_mode  (0=none, 1=finite, 2=infinite)
- *   piOff+32-33: still_time  (0 when still_mode==2)
+ *   piOff+7-10 : Clip_codec_identifier (4 chars)
+ *   piOff+11   : reserved(7) + is_multi_angle(1)
+ *   piOff+12   : connection_condition(4) + reserved(4)
+ *   piOff+13   : ref_to_STC_id
+ *   piOff+14-17: IN_time
+ *   piOff+18-21: OUT_time
+ *   piOff+22-29: UO_mask_table (8 bytes)
+ *   piOff+30   : random_access_flag(1) + still_mode(2) + reserved(5)
+ *   piOff+31-32: still_time (2 bytes, only meaningful when still_mode==1)
  */
 function patchMplsForStill(mplsBuf) {
   const plStart      = mplsBuf.readUInt32BE(8);
@@ -561,8 +568,9 @@ function patchMplsForStill(mplsBuf) {
   let piOff = plStart + 10;
   for (let i = 0; i < numPlayItems; i++) {
     const piLen = newBuf.readUInt16BE(piOff);
-    newBuf[piOff + 31] = 0x02;
-    newBuf.writeUInt16BE(0x0000, piOff + 32);
+    // still_mode occupies bits 6-5 of byte at piOff+30; set to 0x02 (infinite still)
+    newBuf[piOff + 30] = (newBuf[piOff + 30] & 0x9F) | (0x02 << 5);
+    newBuf.writeUInt16BE(0x0000, piOff + 31);
     piOff += 2 + piLen;
   }
   return newBuf;

@@ -147,19 +147,32 @@ def verify(png_path, debug_png=None):
     width, height, pixels = _read_png_rgb(png_path)
     print(f'  Image: {width}x{height}')
 
+    # Auto-detect Retina 2x screenshots and scale ROI coordinates accordingly.
+    # The reference geometry is 1920x1080; a Retina screencap is 3840x2160.
+    scale = round(width / 1920)
+    if scale < 1:
+        scale = 1
+    if scale != 1:
+        print(f'  Retina scale detected: {scale}x — scaling ROI coords by {scale}')
+
     results = []
     for ri, (x0, y0, x1, y1) in enumerate(REGIONS):
+        sx0, sy0, sx1, sy1 = x0*scale, y0*scale, x1*scale, y1*scale
         colored_count = 0
         white_count   = 0
-        for y in range(y0, y1):
-            for x in range(x0, x1):
+        for y in range(sy0, sy1):
+            for x in range(sx0, sx1):
                 if x < width and y < height:
                     r, g, b = pixels[y * width + x]
                     if _is_colored(r, g, b):
                         colored_count += 1
                     elif _is_white(r, g, b):
                         white_count += 1
-        results.append({'colored': colored_count, 'white': white_count})
+        # Normalize counts back to 1x area so thresholds remain scale-independent
+        colored_count = colored_count // (scale * scale)
+        white_count   = white_count   // (scale * scale)
+        results.append({'colored': colored_count, 'white': white_count, 'scale': scale,
+                        'roi': (sx0, sy0, sx1, sy1)})
         status = 'OK' if colored_count >= BUTTON_PIXEL_MIN else 'FAIL'
         print(f'  Button {ri}: colored={colored_count} white={white_count} [{status}]')
 
@@ -195,8 +208,9 @@ def _write_debug_png(out_path, w, h, pixels, results):
             off = (y * w + x) * 4
             rgba[off] = r; rgba[off+1] = g; rgba[off+2] = b; rgba[off+3] = 255
 
-    for ri, (x0, y0, x1, y1) in enumerate(REGIONS):
-        color = (255, 0, 0) if results[ri]['colored'] < BUTTON_PIXEL_MIN else (0, 255, 0)
+    for ri, result in enumerate(results):
+        x0, y0, x1, y1 = result.get('roi', REGIONS[ri])
+        color = (255, 0, 0) if result['colored'] < BUTTON_PIXEL_MIN else (0, 255, 0)
         for x in range(x0, x1):
             for py in [y0, y1-1]:
                 if 0 <= py < h and 0 <= x < w:
