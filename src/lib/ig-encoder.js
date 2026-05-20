@@ -408,6 +408,9 @@ function encodeICS(opts) {
   utd[2] =  userTimeoutTicks        & 0xFF;
   icParts.push(utd);
 
+  // BD spec: number_of_composition_objects MUST appear here. Zero = no composition objects, decoder jumps to number_of_pages.
+  icParts.push(Buffer.from([0x00]));
+
   // num_pages(8) + each page
   icParts.push(Buffer.from([pages.length]));
   pages.forEach(page => icParts.push(encodePage(page)));

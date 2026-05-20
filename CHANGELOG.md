@@ -1,5 +1,25 @@
 # Changelog
 
+## v1.10.7 — 2026-05-20
+
+**ICS number_of_composition_objects field fix (missing byte caused zero-button parse on hardware)**
+
+### Bug — CRITICAL: missing number_of_composition_objects byte in InteractiveComposition
+
+- **Symptom**: hardware BD player — IG menu not rendered, zero buttons, direction keys ignored.
+  Menu background may load but no interactive elements appear.
+- **Root cause**: `encodeICS()` in `src/lib/ig-encoder.js` was missing the 1-byte
+  `number_of_composition_objects` field that the BD spec requires between `user_timeout_duration`
+  and `number_of_pages` in the InteractiveComposition structure (per `ig_decode.c`).
+  Decoders read the missing byte as `num_composition_objects`, then consumed 8 bytes of page
+  data as a fake composition_object descriptor. The next byte read was `uo_mask[6] = 0x00`,
+  which was interpreted as `num_pages = 0`. Zero pages → zero buttons → invisible menu.
+- **Fix**: added `icParts.push(Buffer.from([0x00]))` between `user_timeout_duration` and
+  `num_pages` in `encodeICS()`. Value 0x00 means no composition objects (the standard case).
+- **ICS byte delta**: ICS segments are now 1 byte longer (142 bytes, was 141).
+- **Verified**: mounted v1107_test.iso, parsed 00099.m2ts — ICS[19]=0x00 (num_composition_objects),
+  ICS[20]=0x01 (num_pages=1), total ICS=142 bytes. All 72 unit tests pass.
+
 ## v1.10.6 — 2026-05-20
 
 **ICS InMux stream_model fix + MPLS still_mode fix (confirmed against hardware-verified reference disc)**

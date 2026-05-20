@@ -19,7 +19,7 @@ NODE     = '/opt/homebrew/bin/node'
 
 EP1_MKV  = '/tmp/splash_bd.mkv'
 EP2_MKV  = '/tmp/test_with_subs.mkv'
-ISO_OUT  = os.path.expanduser('~/Desktop/v1103_test.iso')
+ISO_OUT  = os.path.expanduser('~/Desktop/v1106_test.iso')
 
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 MENU_INJ  = os.path.join(TOOLS_DIR, 'menu_inject.js')
@@ -46,7 +46,7 @@ def u16(b, o): return struct.unpack('>H', b[o:o+2])[0]
 
 def detach_test_volumes():
     for vol in Path('/Volumes').iterdir():
-        if vol.name.upper().startswith('TEST') or vol.name.upper().startswith('V1103'):
+        if vol.name.upper().startswith('TEST') or vol.name.upper().startswith('V1103') or vol.name.upper().startswith('V1106'):
             subprocess.run([HDIUTIL, 'detach', str(vol), '-force'], capture_output=True)
 
 def find_prefix(ep_bd):
@@ -196,7 +196,7 @@ def build_disc():
             log(f'ERROR: missing input: {ep}')
             return None, f'Missing input: {ep}'
 
-    work = tempfile.mkdtemp(prefix='v1103_build_')
+    work = tempfile.mkdtemp(prefix='v1106_build_')
     log(f'Work dir: {work}')
 
     try:
@@ -261,13 +261,13 @@ def build_disc():
 
         ok, _ = run([
             XORRISO, '-as', 'mkisofs', '-udf', '-udfver', '2.50',
-            '-V', 'V1103TEST', '-o', ISO_OUT, bd_folder,
+            '-V', 'V1106TEST', '-o', ISO_OUT, bd_folder,
         ], 'xorriso pack ISO', ok_codes=(0, 1))
 
         if not ok or not os.path.exists(ISO_OUT):
             ok, _ = run([
                 XORRISO, '-outdev', f'stdio:{ISO_OUT}',
-                '-map', bd_folder, '/', '-volid', 'V1103TEST', '-commit',
+                '-map', bd_folder, '/', '-volid', 'V1106TEST', '-commit',
             ], 'xorriso native ISO')
 
         if not os.path.exists(ISO_OUT):

@@ -409,6 +409,56 @@ console.log('\n=== 5b: patchMplsForStill writes still_mode=1 to byte[31] (v1.10.
   assert((byte30 & 0x7F) === 0x00, 'byte[30] reserved bits = 0 (only RAF bit kept)');
 }
 
+// ─── Phase 6: v1.10.7 regression — number_of_composition_objects field ────────
+// Bug: encodeICS was missing the number_of_composition_objects byte (1 byte)
+// between user_timeout_duration and num_pages. Hardware decoders read that
+// missing byte as num_composition_objects, ate 8 bytes of page data as a fake
+// composition_object, then read uo_mask[6]=0x00 as num_pages → zero pages →
+// zero buttons → IG menu invisible on hardware.
+
+console.log('\n=== 6: ICS num_composition_objects field (v1.10.7 fix) ===');
+
+{
+  const makeICS1Page = (streamModel) => encodeICS({
+    videoWidth: 1920, videoHeight: 1080, frameRate: 0x40,
+    compositionNumber: 0, compositionState: 2,
+    streamModel, uiModel: false, userTimeoutMs: 0,
+    pages: [{ id: 0, version: 0, uoMask: Buffer.alloc(8),
+      paletteIdRef: 0, defaultSelectedButtonIdRef: 0, defaultActivatedButtonIdRef: 0xFFFF,
+      bogs: [{ defaultValidButtonIdRef: 0, buttons: [
+        { id: 0, x: 0, y: 0, numericSelectValue: 0,
+          normalStartObjId: 0, normalEndObjId: 0, selStartObjId: 1, selEndObjId: 1,
+          actStartObjId: 0, actEndObjId: 0, navCmds: [buildNavCmd('PLAY_PL', 1)] },
+      ]}],
+    }],
+  });
+
+  // ICS segment layout (bytes from start of segment):
+  //   [0]     type (0x18)
+  //   [1-2]   payload length
+  //   [3-7]   VideoDescriptor (5 bytes)
+  //   [8-10]  CompositionDescriptor (3 bytes)
+  //   [11]    SequenceDescriptor (1 byte)
+  //   [12-14] data_length (3 bytes)
+  //   [15]    interaction_model byte (stream_model | ui_model)
+  //   InMux:  [16-18] user_timeout_duration; [19] num_composition_objects; [20] num_pages
+  //   OutMux: [16-25] timeout fields(10); [26-28] user_timeout_duration; [29] num_comp_objs; [30] num_pages
+
+  const icsInMux  = makeICS1Page(true);
+  const icsOutMux = makeICS1Page(false);
+
+  // InMux: num_composition_objects at [19] = 0x00, num_pages at [20] = 0x01
+  assertEq(icsInMux[19], 0x00, 'InMux  ICS[19] num_composition_objects = 0x00');
+  assertEq(icsInMux[20], 0x01, 'InMux  ICS[20] num_pages = 0x01');
+
+  // OutMux: num_composition_objects at [29] = 0x00, num_pages at [30] = 0x01
+  assertEq(icsOutMux[29], 0x00, 'OutMux ICS[29] num_composition_objects = 0x00');
+  assertEq(icsOutMux[30], 0x01, 'OutMux ICS[30] num_pages = 0x01');
+
+  // InMux is still 10 bytes shorter (no timeout fields) — relative difference unchanged by +1 fix
+  assert(icsInMux.length === icsOutMux.length - 10, 'InMux still 10 bytes shorter than OutMux after v1.10.7 fix');
+}
+
 // ─── Summary ──────────────────────────────────────────────────────────────────
 
 console.log(`\n${'─'.repeat(50)}`);

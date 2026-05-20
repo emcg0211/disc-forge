@@ -27,7 +27,7 @@ if (!bdFolder || !numEpisodes) {
 
 const {
   patchClpiForIG, patchMplsForIG, patchMplsClipName, patchMplsForStill,
-  buildMenuDisplaySet, injectIGIntoM2ts, extractFirstVideoPTS,
+  buildMenuDisplaySet, injectIGIntoM2ts, patchPmtForIG, extractFirstVideoPTS,
 } = require(path.join(__dirname, '../src/lib/menu-builder'));
 
 function runTsMuxer(h264Path, outBdmv) {
@@ -114,9 +114,13 @@ async function addMenu() {
   // Fire IG immediately when 00099 starts — vout is already initialized from preload.
   console.log(`[MenuInject] Video PTS: ${videoPts}`);
 
-  const igTs    = buildMenuDisplaySet({ playlists, pts: videoPts, labels, ffmpegPath });
-  const menuM2ts = injectIGIntoM2ts(videoM2ts, igTs);
-  console.log(`[MenuInject] IG injected: ${igTs.length} bytes TS → m2ts ${menuM2ts.length} bytes`);
+  const igTs       = buildMenuDisplaySet({ playlists, pts: videoPts, labels, ffmpegPath });
+  const injectedM2ts = injectIGIntoM2ts(videoM2ts, igTs);
+  console.log(`[MenuInject] IG injected: ${igTs.length} bytes TS → m2ts ${injectedM2ts.length} bytes`);
+
+  // Mirror addMenuToDisc: patch PMT to declare IG stream (PID 0x1400, stream_type 0x91)
+  const menuM2ts = patchPmtForIG(injectedM2ts);
+  console.log('[MenuInject] PMT patched: IG stream_type=0x91 PID=0x1400 added');
 
   // ── Step 7: Install 00098.* (preload) and 00099.* (menu) ─────────────────
   const destStream   = path.join(bdFolder, 'BDMV', 'STREAM');
