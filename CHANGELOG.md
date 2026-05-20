@@ -1,5 +1,35 @@
 # Changelog
 
+## v1.10.5 — 2026-05-20
+
+**PMT IG stream declaration fix (hardware demuxer routing)**
+
+- Hardware BD players (LG tested): disc loaded, navy menu background played, but IG buttons were
+  not rendered and direction/Menu keys had no effect — root cause: the in-stream PMT declared only
+  the video stream (PID 0x1011). Hardware demuxers use the PMT, not CLPI/MPLS, to route PES
+  packets to the IG decoder; without the PMT entry the IG packets were silently dropped.
+- Added `patchPmtForIG(m2tsBuf)` in `src/lib/menu-builder.js`: parses PAT to find the PMT PID,
+  locates the PMT packet, appends a 5-byte ES entry `stream_type=0x91 PID=0x1400`, updates
+  `section_length`, and rewrites the MPEG-2 CRC_32 (polynomial 0x04C11DB7). Idempotent.
+- Applied in `addMenuToDisc` after `injectIGIntoM2ts`, before writing 00099.m2ts to disc.
+- Safety: throws if patched section_length + 4 > 184 (would not fit in one TS packet payload).
+- PMT before: `stream_type=0x1B PID=0x1011` (H.264 video only)
+- PMT after:  `stream_type=0x1B PID=0x1011` + `stream_type=0x91 PID=0x1400` (HDMV IG added)
+- CRC_32 verified: 0xd5bcec80 (computed and stored match)
+
+---
+
+## v1.10.4 — 2026-05-20
+
+**patchMplsForStill off-by-one fix**
+
+- `still_mode` field (bits 6-5) was written to byte `piOff+31` instead of the correct `piOff+30`
+- Fixed: `newBuf[piOff + 30] = (newBuf[piOff + 30] & 0x9F) | (0x02 << 5)`
+- Also: Retina 2x scale support in `verify_menu_buttons.py` (ROI coords scaled, pixel counts
+  normalised back to 1x area so thresholds remain scale-independent)
+
+---
+
 ## v1.10.3 — 2026-05-19
 
 **Two-clip preload strategy for IG menu (VLC vout timing fix)**

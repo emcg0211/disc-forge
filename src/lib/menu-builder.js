@@ -342,6 +342,142 @@ function injectIGIntoM2ts(videoM2ts, igTs188, insertAfterN = 10) {
   ]);
 }
 
+// ── MPEG-2 CRC32 (polynomial 0x04C11DB7, initial 0xFFFFFFFF, no final XOR, big-endian) ───────
+function mpegCrc32(buf) {
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < buf.length; i++) {
+    crc ^= (buf[i] << 24);
+    for (let j = 0; j < 8; j++) {
+      crc = (crc & 0x80000000) ? ((crc << 1) ^ 0x04C11DB7) : (crc << 1);
+      crc = crc >>> 0;
+    }
+  }
+  return crc >>> 0;
+}
+
+/**
+ * Patch the PMT packet in a BD m2ts buffer to add an IG stream entry.
+ *
+ * Hardware demuxers route PES packets to the IG decoder only when the PMT
+ * declares the stream. CLPI/MPLS declarations alone are not sufficient.
+ * This function locates the PMT via the PAT, appends a 5-byte ES entry for
+ * PID igPid with stream_type igStreamType, updates section_length, and
+ * rewrites the CRC_32. Idempotent: returns the original buffer if the PID
+ * is already declared.
+ *
+ * @param {Buffer} m2tsBuf      - 192-byte BD m2ts stream (with arrival timestamps)
+ * @param {number} igPid        - IG elementary stream PID (default 0x1400)
+ * @param {number} igStreamType - IG stream type (default 0x91 = HDMV IG)
+ * @returns {Buffer} patched m2ts buffer (or original if already patched)
+ */
+function patchPmtForIG(m2tsBuf, igPid = 0x1400, igStreamType = 0x91) {
+  // Step 1: Parse PAT (PID 0x0000) to find PMT PID
+  let pmtPid = -1;
+  for (let i = 0; i + 192 <= m2tsBuf.length; i += 192) {
+    const pkt = m2tsBuf.slice(i + 4, i + 192); // skip 4-byte BD arrival timestamp
+    if (pkt[0] !== 0x47) continue;
+    const pid = ((pkt[1] & 0x1F) << 8) | pkt[2];
+    if (pid !== 0x0000) continue;
+    if (!(pkt[1] & 0x40)) continue; // need PUSI to start section
+    const hasAdaptation = (pkt[3] & 0x20) !== 0;
+    const payloadStart = hasAdaptation ? (4 + 1 + pkt[4]) : 4;
+    const pointer = pkt[payloadStart];
+    const sectionStart = payloadStart + 1 + pointer;
+    if (pkt[sectionStart] !== 0x00) continue; // table_id must be 0x00 for PAT
+    const sectionLength = ((pkt[sectionStart + 1] & 0x0F) << 8) | pkt[sectionStart + 2];
+    // program entries: sectionStart+3 (table_id+2 bytes) +5 fixed bytes = sectionStart+8
+    const programsStart = sectionStart + 8;
+    const programsEnd   = sectionStart + 3 + sectionLength - 4; // exclude CRC_32
+    for (let p = programsStart; p + 4 <= programsEnd; p += 4) {
+      const progNum = (pkt[p] << 8) | pkt[p + 1];
+      if (progNum !== 0) { // program_number 0 = NIT pointer, skip
+        pmtPid = ((pkt[p + 2] & 0x1F) << 8) | pkt[p + 3];
+        break;
+      }
+    }
+    if (pmtPid !== -1) break;
+  }
+  if (pmtPid === -1) throw new Error('patchPmtForIG: PAT not found in m2ts stream');
+
+  // Step 2: Find PMT packet (table_id 0x02) and patch it
+  for (let i = 0; i + 192 <= m2tsBuf.length; i += 192) {
+    const pktOff = i + 4;
+    const pkt    = m2tsBuf.slice(pktOff, pktOff + 188);
+    if (pkt[0] !== 0x47) continue;
+    const pid = ((pkt[1] & 0x1F) << 8) | pkt[2];
+    if (pid !== pmtPid) continue;
+    if (!(pkt[1] & 0x40)) continue; // only PUSI packet starts the section
+    const hasAdaptation = (pkt[3] & 0x20) !== 0;
+    const payloadStart  = hasAdaptation ? (4 + 1 + pkt[4]) : 4;
+    const pointer       = pkt[payloadStart];
+    const sectionStart  = payloadStart + 1 + pointer;
+    if (pkt[sectionStart] !== 0x02) continue; // table_id must be 0x02 for PMT
+
+    const sectionLength = ((pkt[sectionStart + 1] & 0x0F) << 8) | pkt[sectionStart + 2];
+    // sectionStart+10..11: reserved(4)+program_info_length(12)
+    const progInfoLen   = ((pkt[sectionStart + 10] & 0x0F) << 8) | pkt[sectionStart + 11];
+    const esLoopStart   = sectionStart + 12 + progInfoLen;
+    const crcOff        = sectionStart + 3 + sectionLength - 4; // first byte of CRC_32
+
+    // Walk ES loop: check for igPid (idempotency) and find loop end
+    let esOff = esLoopStart;
+    while (esOff + 5 <= crcOff) {
+      const esPid      = ((pkt[esOff + 1] & 0x1F) << 8) | pkt[esOff + 2];
+      const esInfoLen  = ((pkt[esOff + 3] & 0x0F) << 8) | pkt[esOff + 4];
+      if (esPid === igPid) return m2tsBuf; // already declared, nothing to do
+      esOff += 5 + esInfoLen;
+    }
+
+    const newSectionLength = sectionLength + 5;
+    if (newSectionLength + 4 > 184) {
+      throw new Error(`patchPmtForIG: PMT section too large after IG insertion (section_length + 4 = ${newSectionLength + 4} > 184)`);
+    }
+
+    // Build updated 3-byte section header with new section_length
+    const sectionHeader = Buffer.from(pkt.slice(sectionStart, sectionStart + 3));
+    sectionHeader[1] = (sectionHeader[1] & 0xF0) | ((newSectionLength >> 8) & 0x0F);
+    sectionHeader[2] = newSectionLength & 0xFF;
+
+    // New ES entry: stream_type(1) + reserved(3)+PID(13 in 2 bytes) + reserved(4)+ES_info_length(12 in 2 bytes)
+    const igEntry = Buffer.from([
+      igStreamType,
+      0xE0 | (igPid >> 8),
+      igPid & 0xFF,
+      0xF0,
+      0x00,
+    ]);
+
+    // Full section body: header + fixed fields + program_info + ES loop + new IG entry
+    const sectionBody = Buffer.concat([
+      sectionHeader,
+      pkt.slice(sectionStart + 3, crcOff), // everything between header and old CRC
+      igEntry,
+    ]);
+
+    // Recompute CRC_32 over the complete section body
+    const newCrc = mpegCrc32(sectionBody);
+    const crcBuf = Buffer.alloc(4);
+    crcBuf.writeUInt32BE(newCrc, 0);
+
+    // Pad remaining TS payload with 0xFF stuffing bytes
+    const newSectionEndInPkt = sectionStart + sectionBody.length + 4;
+    const stuffLen = 188 - newSectionEndInPkt;
+
+    const newPkt = Buffer.concat([
+      pkt.slice(0, sectionStart),
+      sectionBody,
+      crcBuf,
+      Buffer.alloc(Math.max(0, stuffLen), 0xFF),
+    ]);
+
+    const newM2ts = Buffer.from(m2tsBuf);
+    newPkt.copy(newM2ts, pktOff, 0, 188);
+    return newM2ts;
+  }
+
+  throw new Error(`patchPmtForIG: PMT packet (PID 0x${pmtPid.toString(16).padStart(4, '0')}) not found`);
+}
+
 /**
  * Patch a CLPI ProgramInfo section to declare an IG stream at IG_PID.
  *
@@ -583,6 +719,7 @@ module.exports = {
   renderButtonPixels,
   convertTsBdFormat,
   injectIGIntoM2ts,
+  patchPmtForIG,
   patchClpiForIG,
   patchMplsForIG,
   patchMplsClipName,

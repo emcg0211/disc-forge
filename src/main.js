@@ -3569,7 +3569,7 @@ async function addMenuToDisc(bdFolder, numEpisodes, workDir, igMenuConfig = {}) 
   // The preload clip initializes the vout so that when 00099 starts and the GC fires,
   // p_sys->p_vout is non-NULL and the overlay is rendered correctly.
   const { patchClpiForIG, patchMplsForIG, patchMplsClipName, patchMplsForStill,
-          buildMenuDisplaySet, injectIGIntoM2ts, extractFirstVideoPTS } =
+          buildMenuDisplaySet, injectIGIntoM2ts, patchPmtForIG, extractFirstVideoPTS } =
     require('./lib/menu-builder');
 
   const menuTmpDir  = path.join(workDir, 'menu_tmp');
@@ -3662,8 +3662,14 @@ async function addMenuToDisc(bdFolder, numEpisodes, workDir, igMenuConfig = {}) 
     labels:     menuLabels,
     ffmpegPath: TOOLS.ffmpeg,
   });
-  const menuM2ts = injectIGIntoM2ts(videoM2ts, igTs);
-  sendLog(`[Menu] IG injected: ${igTs.length} bytes TS → m2ts now ${menuM2ts.length} bytes`);
+  const injectedM2ts = injectIGIntoM2ts(videoM2ts, igTs);
+  sendLog(`[Menu] IG injected: ${igTs.length} bytes TS → m2ts now ${injectedM2ts.length} bytes`);
+
+  // ── Step 6b: Patch PMT to declare IG stream (PID 0x1400, stream_type 0x91) ──
+  // Hardware demuxers route IG PES packets to the decoder only when the PMT
+  // declares the stream. CLPI/MPLS declarations alone are not sufficient.
+  const menuM2ts = patchPmtForIG(injectedM2ts);
+  sendLog('[Menu] PMT patched: IG stream_type=0x91 PID=0x1400 added to PMT');
 
   // ── Step 7: Install 00098.* (preload) and 00099.* (menu) ─────────────────
   const destStream   = path.join(bdFolder, 'BDMV', 'STREAM');
