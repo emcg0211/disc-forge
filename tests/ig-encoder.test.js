@@ -334,6 +334,81 @@ console.log('\n=== 4f: MPEG-TS packetizer ===');
   }
 }
 
+// ─── Phase 5: v1.10.6 regression — InMux stream_model and still_mode ─────────
+
+console.log('\n=== 5a: ICS stream_model=InMux (v1.10.6 fix) ===');
+
+{
+  // With streamModel=true (InMux): interaction_model byte bit-7 must be 1.
+  // With streamModel=false (OutOfMux): bit-7 is 0, and 10 bytes of timeout fields follow.
+  // Root-cause: OutOfMux + composition_timeout_pts=0 means composition expires at PTS=0,
+  // which the hardware already passed (video PTS ~54,000,000). Hardware discards IG silently.
+  // Ref: Beach Boys 50 Live reference disc — IG clips use InMux (stream in same m2ts).
+  const makeICS = (streamModel) => encodeICS({
+    videoWidth: 1920, videoHeight: 1080, frameRate: 0x40,
+    compositionNumber: 0, compositionState: 2,
+    streamModel, uiModel: false, userTimeoutMs: 0,
+    pages: [{ id: 0, version: 0, uoMask: Buffer.alloc(8),
+      paletteIdRef: 0, defaultSelectedButtonIdRef: 0, defaultActivatedButtonIdRef: 0xFFFF,
+      bogs: [{ defaultValidButtonIdRef: 0, buttons: [
+        { id: 0, x: 0, y: 0, numericSelectValue: 0,
+          normalStartObjId: 0, normalEndObjId: 0, selStartObjId: 1, selEndObjId: 1,
+          actStartObjId: 0, actEndObjId: 0, navCmds: [buildNavCmd('PLAY_PL', 1)] },
+      ]}],
+    }],
+  });
+
+  // ICS byte layout (segment):
+  //   [0]=type  [1-2]=length  [3-7]=VideoDescriptor(5)  [8-10]=CompositionDescriptor(3)
+  //   [11]=SequenceDescriptor  [12-14]=data_length  [15]=interaction_model byte
+  const icsInMux  = makeICS(true);
+  const icsOutMux = makeICS(false);
+
+  assertEq(icsInMux[15] & 0x80, 0x80, 'InMux  ICS[15] stream_model bit = 1 (0x80)');
+  assertEq(icsOutMux[15] & 0x80, 0x00, 'OutMux ICS[15] stream_model bit = 0 (0x00)');
+  // InMux ICS is 10 bytes shorter (no timeout fields)
+  assert(icsInMux.length === icsOutMux.length - 10, 'InMux ICS is 10 bytes shorter than OutMux (no timeouts)');
+  // Both must still be epoch_start
+  assertEq(icsInMux[10], 0x80, 'InMux  ICS composition_state = 0x80 (epoch_start)');
+  assertEq(icsOutMux[10], 0x80, 'OutMux ICS composition_state = 0x80 (epoch_start)');
+}
+
+console.log('\n=== 5b: patchMplsForStill writes still_mode=1 to byte[31] (v1.10.6 fix) ===');
+
+{
+  // patchMplsForStill was writing to bits 5-6 of byte[30] (reserved) instead of
+  // byte[31] (still_mode field), and using still_mode=0x02 (timed) instead of 0x01 (infinite).
+  // Ref: PlayItem spec — byte[30]=random_access_flag+reserved, byte[31]=still_mode.
+  const { patchMplsForStill } = require(path.join(__dirname, '..', 'src', 'lib', 'menu-builder.js'));
+
+  // Build a synthetic MPLS with a PlayItem that has bytes[30-33] = all zeros
+  // MPLS header: magic(8) + PlayList_addr(4) + PlayListMark_addr(4) + ext_addr(4) = 20 bytes minimum
+  // PlayList at offset 0x3A (standard): length(4)+reserved(2)+num_items(2)+num_subpaths(2) = 10 bytes header
+  // PlayItem: length(2) + payload(80 bytes) = 82 bytes total, pi[30]=0x00 pi[31]=0x00 originally
+  const PL_OFF = 0x3A;
+  const PI_OFF = PL_OFF + 10;  // PlayItem[0] starts here
+
+  const mplsBuf = Buffer.alloc(PI_OFF + 2 + 82, 0x00);
+  mplsBuf.write('MPLS0200', 0, 'ascii');
+  mplsBuf.writeUInt32BE(PL_OFF, 8);           // PlayList_start_address
+  mplsBuf.writeUInt32BE(PI_OFF + 2 + 82, 12); // PlayListMark_start_address (past end)
+  mplsBuf.writeUInt32BE(0, 16);               // ExtensionData = 0
+  mplsBuf.writeUInt32BE(PI_OFF + 82, PL_OFF); // PlayList.length
+  mplsBuf.writeUInt16BE(1, PL_OFF + 6);       // num_PlayItems = 1
+  mplsBuf.writeUInt16BE(0, PL_OFF + 8);       // num_SubPaths = 0
+  mplsBuf.writeUInt16BE(80, PI_OFF);           // PlayItem.length = 80
+
+  const patched = patchMplsForStill(mplsBuf);
+
+  const byte30 = patched[PI_OFF + 30];
+  const byte31 = patched[PI_OFF + 31];
+  const byte32_33 = patched.readUInt16BE(PI_OFF + 32);
+
+  assertEq(byte31, 0x01,   'still_mode byte[31] = 0x01 (infinite still)');
+  assertEq(byte32_33, 0x00, 'still_time bytes[32-33] = 0x0000');
+  assert((byte30 & 0x7F) === 0x00, 'byte[30] reserved bits = 0 (only RAF bit kept)');
+}
+
 // ─── Summary ──────────────────────────────────────────────────────────────────
 
 console.log(`\n${'─'.repeat(50)}`);

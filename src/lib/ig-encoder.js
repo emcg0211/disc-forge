@@ -266,7 +266,7 @@ function encodeWDS(windows) {
  * @param {number} opts.frameRate          - 4-bit frame rate code (0x40 = 24fps, 0x50 = 25fps, 0x60 = 29.97fps)
  * @param {number} opts.compositionNumber  - display set counter
  * @param {number} opts.compositionState   - 0=normal, 1=acq_point, 2=epoch_start, 3=epoch_continue
- * @param {boolean} opts.streamModel       - false=ODS in same stream, true=ODS in subpath
+ * @param {boolean} opts.streamModel       - true=InMux (ODS in same clip as video, no timeout fields), false=OutOfMux (ODS from subpath, timeout fields present)
  * @param {boolean} opts.uiModel           - false=always-on, true=popup
  * @param {number} opts.userTimeoutMs      - user timeout in ms (0=infinite)
  * @param {Array<IGPage>} opts.pages       - page descriptors (see IGPage below)

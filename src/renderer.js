@@ -943,7 +943,7 @@ function titlebarHTML(tools) {
     <div class="titlebar-brand">
       <div class="titlebar-logo">💿</div>
       <span class="titlebar-name">Disc Forge</span>
-      <span class="titlebar-version">1.10.5</span>
+      <span class="titlebar-version">1.10.6</span>
     </div>
     <div class="titlebar-spacer"></div>
     <div class="titlebar-tools">
@@ -2226,6 +2226,7 @@ function welcomeModalHTML() {
 // ── About Modal ───────────────────────────────────────────────────────────────
 function aboutModalHTML() {
   const versions = [
+    { v:'1.10.6', notes:['ICS InMux stream_model fix: ICS interaction_model byte bit7 now=1 (InMux), was 0 (OutOfMux with composition_timeout_pts=0 → hardware discarded overlay as expired)', 'MPLS still_mode fix: patchMplsForStill now writes 0x01 to byte[31] (infinite still); prior code wrote to reserved bits of byte[30] leaving byte[31]=0x00 (no-still)', 'Root cause confirmed via byte-level comparison against Beach Boys 50 Live (2012, Eagle Rock) hardware-verified reference disc'] },
     { v:'1.10.5', notes:['PMT IG stream declaration fix: hardware demuxers require the PMT to declare stream_type=0x91 PID=0x1400; CLPI/MPLS alone are not sufficient', 'patchPmtForIG() appends the IG ES entry to the PMT and rewrites the MPEG-2 CRC_32', 'Root cause: LG BD player test — menu background loaded but IG buttons not rendered, direction keys silently ignored'] },
     { v:'1.10.4', notes:['patchMplsForStill off-by-one fix: still_mode bits 6-5 now written to correct byte piOff+30', 'Retina 2x display support in verify_menu_buttons.py'] },
     { v:'1.10.3', notes:['Two-clip preload strategy: 1s preload (00098) initializes VLC vout before menu clip (00099) fires IG overlay', 'MPLS still_mode=2 on menu clip for persistent menu on hardware players', 'MovieObject obj[2]: PLAY_PL(98)→PLAY_PL(99)→JUMP_OBJECT(2)'] },
@@ -2255,7 +2256,7 @@ function aboutModalHTML() {
     '<div style="text-align:center;margin-bottom:16px">' +
     '<div style="font-size:40px;margin-bottom:6px">💿</div>' +
     '<div class="modal-title" style="font-size:20px">Disc Forge</div>' +
-    '<div style="font-size:12px;color:var(--gold);font-weight:600;margin-bottom:4px">Version 1.10.5</div>' +
+    '<div style="font-size:12px;color:var(--gold);font-weight:600;margin-bottom:4px">Version 1.10.6</div>' +
     '<div style="font-size:11px;color:var(--text-tertiary)">Professional Blu-ray authoring for macOS</div>' +
     '</div>' +
     '<div style="max-height:320px;overflow-y:auto;border-top:1px solid var(--border-dim);border-bottom:1px solid var(--border-dim);padding:12px 0;margin-bottom:14px">' +

@@ -235,7 +235,7 @@ function buildMenuDisplaySet({ videoWidth = 1920, videoHeight = 1080, playlists 
       frameRate:        0x40,   // 24fps
       compositionNumber: 0,
       compositionState:  2,     // epoch_start
-      streamModel:       false,
+      streamModel:       true,  // InMux: IG and ODS are in the same m2ts clip as video
       uiModel:           false,
       userTimeoutMs:     0,
       pages: [{
@@ -704,9 +704,14 @@ function patchMplsForStill(mplsBuf) {
   let piOff = plStart + 10;
   for (let i = 0; i < numPlayItems; i++) {
     const piLen = newBuf.readUInt16BE(piOff);
-    // still_mode occupies bits 6-5 of byte at piOff+30; set to 0x02 (infinite still)
-    newBuf[piOff + 30] = (newBuf[piOff + 30] & 0x9F) | (0x02 << 5);
-    newBuf.writeUInt16BE(0x0000, piOff + 31);
+    // PlayItem byte layout (after UO_mask_table at [22-29]):
+    //   [30]: random_access_flag(1) + reserved(7)
+    //   [31]: still_mode — 0x00=no-still, 0x01=infinite-still, 0x02=timed-still
+    //   [32-33]: still_time (only meaningful when still_mode==0x02)
+    // Ref: Beach Boys 50 Live reference disc — 00001.mpls PlayItem byte[31]=0x01 for IG menu clip.
+    newBuf[piOff + 30] = newBuf[piOff + 30] & 0x80;  // keep only RAF bit, clear reserved bits
+    newBuf[piOff + 31] = 0x01;                        // still_mode = 0x01 (infinite still)
+    newBuf.writeUInt16BE(0x0000, piOff + 32);          // still_time = 0 (N/A for infinite still)
     piOff += 2 + piLen;
   }
   return newBuf;

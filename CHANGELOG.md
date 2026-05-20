@@ -1,5 +1,55 @@
 # Changelog
 
+## v1.10.6 — 2026-05-20
+
+**ICS InMux stream_model fix + MPLS still_mode fix (confirmed against hardware-verified reference disc)**
+
+Root cause methodology: byte-level structural comparison of v1.10.5 ISO against Beach Boys 50 Live
+(2012, Eagle Rock Entertainment) — a hardware-verified HDMV IG disc confirmed working on LG BD player.
+
+### Bug 1 — CRITICAL: ICS stream_model=OutOfMux with composition_timeout_pts=0
+
+- **Symptom**: hardware BD player (LG tested) — menu background visible, IG buttons not rendered,
+  direction keys silently ignored. Identical to v1.10.5 symptom (which fixed PMT; this fixes ICS).
+- **Root cause**: `encodeICS()` was called with `streamModel: false` (OutOfMux mode). In OutOfMux
+  mode the ICS interaction_model byte has bit7=0, and the encoder appends 10 zero bytes for
+  `composition_timeout_pts` (5 bytes) and `selection_timeout_pts` (5 bytes). Both timeouts = 0
+  means the composition expired at PTS=0. Since video PTS starts at 54,000,000 ticks (600 s at
+  90 kHz), the hardware treats the composition as already expired on first decode and silently
+  discards the entire IG overlay.
+- **Fix**: `buildMenuDisplaySet()` now calls `encodeICS()` with `streamModel: true` (InMux).
+  In InMux mode bit7=1, the 10 timeout bytes are absent, and timing is derived from PES PTS alone.
+- **Reference disc**: Beach Boys 50 Live 00003.m2ts ICS — interaction_model byte bit7=1 (InMux).
+- **Byte delta**: ICS segments are now 10 bytes shorter (no timeout fields). `patchPmtForIG` and
+  `patchClpiForIG` are unaffected (stream_type/PID unchanged).
+
+### Bug 2 — LIKELY: MPLS still_mode=0x00 (no-still) instead of 0x01 (infinite-still)
+
+- **Root cause**: `patchMplsForStill()` in v1.10.4 wrote `(0x02 << 5)` into bits 6-5 of byte
+  `piOff+30`. The BD-ROM spec PlayItem layout is:
+  - `[30]`: `random_access_flag`(bit7) + reserved(bits6-0)
+  - `[31]`: `still_mode` — 0x00=no-still, 0x01=infinite-still, 0x02=timed-still
+  - `[32-33]`: `still_time` (only meaningful for still_mode=0x02)
+  The v1.10.4 code wrote to reserved bits of byte[30] (0x40 observed in v1.10.5 MPLS) and left
+  byte[31]=0x00 (no-still). With no-still, the menu clip plays once and ends; it does not hold
+  the last frame for user interaction.
+- **Fix**: `patchMplsForStill()` now writes:
+  - `byte[30]`: `newBuf[piOff+30] & 0x80` — preserves only RAF bit, clears reserved bits
+  - `byte[31]`: `0x01` — infinite-still
+  - `byte[32-33]`: `0x0000` — still_time=0 (N/A for infinite-still)
+- **Reference disc**: Beach Boys 50 Live 00001.mpls PlayItem byte[31]=0x01 (infinite-still).
+
+### Test coverage
+
+- 8 new unit tests added in `tests/ig-encoder.test.js` (Phase 5a: 5 tests, Phase 5b: 3 tests).
+- Total: 67/67 tests passing.
+- Phase 5a verifies ICS byte[15] bit7=1 for InMux, =0 for OutOfMux, and that InMux ICS is exactly
+  10 bytes shorter than OutOfMux ICS.
+- Phase 5b verifies patchMplsForStill writes byte[31]=0x01, byte[32-33]=0x0000, byte[30] reserved
+  bits=0.
+
+---
+
 ## v1.10.5 — 2026-05-20
 
 **PMT IG stream declaration fix (hardware demuxer routing)**
