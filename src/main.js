@@ -3569,7 +3569,8 @@ async function addMenuToDisc(bdFolder, numEpisodes, workDir, igMenuConfig = {}) 
   // The preload clip initializes the vout so that when 00099 starts and the GC fires,
   // p_sys->p_vout is non-NULL and the overlay is rendered correctly.
   const { patchClpiForIG, patchMplsForIG, patchMplsClipName, patchMplsForStill,
-          buildMenuDisplaySet, injectIGIntoM2ts, patchPmtForIG, extractFirstVideoPTS } =
+          buildMenuDisplaySet, injectIGIntoM2ts, patchPmtForIG, extractFirstVideoPTS,
+          rewriteVideoPesDts } =
     require('./lib/menu-builder');
 
   const menuTmpDir  = path.join(workDir, 'menu_tmp');
@@ -3580,36 +3581,42 @@ async function addMenuToDisc(bdFolder, numEpisodes, workDir, igMenuConfig = {}) 
   fs.mkdirSync(preBdmv,  { recursive: true });
 
   // ── Step 1: Generate clips (1s preload + 5s menu) ─────────────────────────
-  const preH264  = path.join(preTmpDir,  'pre_bg.h264');
-  const menuH264 = path.join(menuTmpDir, 'menu_bg.h264');
+  // Output as MKV with B-frames so tsMuxeR writes PTS+DTS (flags2=0xC0) for
+  // I/P frames automatically. B-frames (flags2=0x80) are patched in Step 6b.
+  // BD-ROM spec mandates PTS+DTS on all H.264 video PES; missing DTS causes
+  // hardware players to never fire IG overlay composition (no buttons rendered).
+  const preMkv  = path.join(preTmpDir,  'pre_bg.mkv');
+  const menuMkv = path.join(menuTmpDir, 'menu_bg.mkv');
   const ffArgs = (dur) => [
     '-y', '-f', 'lavfi',
     '-i', `color=c=0x1a1a2e:size=1920x1080:rate=24`,
     '-t', String(dur),
     '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
-    '-preset', 'ultrafast', '-crf', '28',
+    '-preset', 'medium', '-crf', '28',
+    '-bf', '2', '-g', '24',
   ];
 
   sendLog('[Menu] Generating preload clip (1s) and menu clip (5s)');
   await new Promise((resolve, reject) => {
-    const ff = spawn(TOOLS.ffmpeg, [...ffArgs(1), preH264]);
+    const ff = spawn(TOOLS.ffmpeg, [...ffArgs(1), preMkv]);
     ff.stderr.on('data', () => {});
     ff.on('error', reject);
     ff.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg preload exit ${code}`)));
   });
   await new Promise((resolve, reject) => {
-    const ff = spawn(TOOLS.ffmpeg, [...ffArgs(5), menuH264]);
+    const ff = spawn(TOOLS.ffmpeg, [...ffArgs(5), menuMkv]);
     ff.stderr.on('data', () => {});
     ff.on('error', reject);
     ff.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg menu bg exit ${code}`)));
   });
 
   // ── Step 2: tsMuxeR for preload and menu clips ────────────────────────────
-  async function runTsMuxer(h264, outBdmv, label) {
-    const meta = h264 + '.meta';
+  async function runTsMuxer(mkv, outBdmv, label) {
+    const meta = mkv + '.meta';
+    // track=1 required for MKV container; fps=24 matches encoding
     fs.writeFileSync(meta,
       `MUXOPT --no-pcr-on-video-pid --new-audio-pes --blu-ray\n` +
-      `V_MPEG4/ISO/AVC, "${tsPath(h264)}", level=4.1, insertSEI, contSPS, lang=und, fps=24\n`
+      `V_MPEG4/ISO/AVC, "${tsPath(mkv)}", track=1, level=4.1, insertSEI, contSPS, lang=und, fps=24\n`
     );
     sendLog(`[Menu] Running tsMuxeR for ${label} clip`);
     await new Promise((resolve, reject) => {
@@ -3630,8 +3637,8 @@ async function addMenuToDisc(bdFolder, numEpisodes, workDir, igMenuConfig = {}) 
     };
   }
 
-  const prePaths  = await runTsMuxer(preH264,  preBdmv,  'preload');
-  const menuPaths = await runTsMuxer(menuH264, menuBdmv, 'menu');
+  const prePaths  = await runTsMuxer(preMkv,  preBdmv,  'preload');
+  const menuPaths = await runTsMuxer(menuMkv, menuBdmv, 'menu');
 
   // ── Step 3: Patch preload MPLS (clip rename only, no IG, no still) ────────
   const renamedPreMpls = patchMplsClipName(fs.readFileSync(prePaths.mpls), '00098');
@@ -3651,7 +3658,14 @@ async function addMenuToDisc(bdFolder, numEpisodes, workDir, igMenuConfig = {}) 
   );
   const playlists = Array.from({ length: numEpisodes }, (_, i) => i + 1);
 
-  const videoM2ts = fs.readFileSync(menuPaths.m2ts);
+  const rawVideoM2ts = fs.readFileSync(menuPaths.m2ts);
+
+  // ── Step 6a: Ensure all video PES have PTS+DTS (BD-ROM mandatory) ─────────
+  // tsMuxeR writes DTS only when DTS != PTS (I/P frames in a B-frame stream).
+  // B-frames get PTS-only (flags2=0x80); patch them to flags2=0xC0 by stealing
+  // 5 bytes from adaptation field stuffing (always present, 77+ bytes for B-frames).
+  // DTS = PTS - 3750 (1 frame at 24fps) for all patched frames.
+  const videoM2ts = rewriteVideoPesDts(rawVideoM2ts, 3750);
   const videoPts  = extractFirstVideoPTS(videoM2ts);
   // Fire IG immediately when 00099 starts — vout is already initialized from preload.
   sendLog(`[Menu] Video PTS: ${videoPts}`);

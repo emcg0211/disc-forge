@@ -720,9 +720,130 @@ function patchMplsForStill(mplsBuf) {
   return newBuf;
 }
 
+/**
+ * Rewrite video PES headers in a BD m2ts to ensure every video PUSI packet
+ * has both PTS and DTS (flags2 = 0xC0, hdr_len = 10).
+ *
+ * tsMuxeR only writes DTS when DTS != PTS (i.e., for I/P frames in a B-frame
+ * stream). B-frames are emitted with PTS-only (flags2 = 0x80). BD-ROM spec
+ * mandates PTS+DTS for all H.264 video PES. Hardware players (LG BP350) use
+ * video DTS to schedule IG overlay composition; missing DTS causes buttons to
+ * never render.
+ *
+ * Strategy: for PUSI packets that have PTS but no DTS, steal 5 bytes from the
+ * TS adaptation field stuffing (always present with 77+ bytes for B-frames),
+ * reduce af_len by 5, insert the DTS field (5 bytes) after the PTS field, and
+ * update flags2 and hdr_len accordingly.
+ *
+ * DTS value: PTS - frameDuration (default 3750 ticks = 1 frame at 24fps).
+ * BD hardware accepts a constant 1-frame DTS offset for all frame types.
+ *
+ * @param {Buffer} m2tsBuf      - 192-byte BD m2ts packets
+ * @param {number} frameDuration - 90kHz ticks per frame (default 3750 = 24fps)
+ * @returns {Buffer} patched m2ts with PTS+DTS on all video PUSI packets
+ */
+function rewriteVideoPesDts(m2tsBuf, frameDuration = 3750) {
+  const VIDEO_PID = 0x1011;
+  if (m2tsBuf.length % 192 !== 0) throw new Error('rewriteVideoPesDts: buffer not aligned to 192 bytes');
+
+  const out = Buffer.from(m2tsBuf);  // copy
+
+  for (let i = 0; i + 192 <= out.length; i += 192) {
+    const pkt = out.slice(i + 4, i + 192);  // 188-byte TS packet (mutable view)
+
+    if (pkt[0] !== 0x47) continue;
+    const pid  = ((pkt[1] & 0x1f) << 8) | pkt[2];
+    const pusi = (pkt[1] >> 6) & 1;
+    const afc  = (pkt[3] >> 4) & 3;
+    if (pid !== VIDEO_PID || !pusi) continue;
+
+    // Locate PES header in payload
+    let afLen = 0;
+    let payloadStart;
+    if (afc & 2) {
+      afLen = pkt[4];          // adaptation_field_length (content bytes)
+      payloadStart = 5 + afLen;
+    } else {
+      payloadStart = 4;
+    }
+
+    const pes = pkt.slice(payloadStart);
+    if (pes.length < 14) continue;
+    if (pes[0] !== 0 || pes[1] !== 0 || pes[2] !== 1) continue;  // no start code
+    const flags2  = pes[7];
+    const hdrLen  = pes[8];
+    const ptsFlag = (flags2 >> 7) & 1;
+    const dtsFlag = (flags2 >> 6) & 1;
+
+    if (!ptsFlag || dtsFlag) continue;  // already OK or no PTS to work from
+    if (hdrLen < 5 || pes.length < 9 + hdrLen) continue;
+
+    // Require adaptation field with at least 6 bytes content (1 flags + 5 stuffing)
+    if (!(afc & 2) || afLen < 6) continue;  // packet #0 (IDR) already has DTS from tsMuxeR
+
+    // Decode PTS
+    const p = pes.slice(9, 14);
+    const pts = ((p[0] & 0x0e) * (1 << 29)) +
+                (p[1] * (1 << 22)) +
+                ((p[2] & 0xfe) * (1 << 14)) +
+                (p[3] * (1 << 7)) +
+                ((p[4] & 0xfe) >> 1);
+
+    // Clamp DTS to 0 to avoid wrap-around on very early frames
+    const dts = Math.max(0, pts - frameDuration);
+
+    // Encode DTS (5 bytes, marker nibble 0x01) — same layout as ig-encoder.encodeDTS
+    const dtsBuf = Buffer.alloc(5);
+    dtsBuf[0] = 0x11 | (((dts >> 30) & 0x07) << 1);
+    dtsBuf[1] = (dts >> 22) & 0xFF;
+    dtsBuf[2] = ((dts >> 15) & 0x7F) << 1 | 1;
+    dtsBuf[3] = (dts >> 7) & 0xFF;
+    dtsBuf[4] = ((dts & 0x7F) << 1) | 1;
+
+    // Steal 5 bytes from adaptation field stuffing: reduce af_len by 5
+    // pkt[4] = af_len; stuffing starts at pkt[5 + 1] (after af_flags byte)
+    pkt[4] = afLen - 5;
+
+    // Shift payload left by 5 (AF shrinks; payload grows by 5 at its old start)
+    // New payload start is 5 bytes earlier
+    const newPayloadStart = payloadStart - 5;
+    // Copy PES header + existing PTS to new position
+    pkt.copy(pkt, newPayloadStart, payloadStart, payloadStart + 9 + 5);  // 9 fixed + 5 PTS
+
+    // Update PTS prefix nibble: 0011 (PTS+DTS present)
+    pkt[newPayloadStart + 9] = (pkt[newPayloadStart + 9] & 0x0f) | 0x30;
+
+    // Insert DTS after PTS
+    const dtsOff = newPayloadStart + 14;
+    dtsBuf.copy(pkt, dtsOff);
+
+    // Copy ES data (after old PTS field) to new position (after new DTS field)
+    const esStart = payloadStart + 14;
+    const newEsStart = dtsOff + 5;
+    if (esStart < 188 && newEsStart < 188) {
+      pkt.copy(pkt, newEsStart, esStart, 188);
+    }
+
+    // Update PES header fields
+    pkt[newPayloadStart + 7] = (flags2 & 0x3f) | 0xc0;  // PTS_DTS_flags = 11
+    pkt[newPayloadStart + 8] = hdrLen + 5;               // extend hdr_len
+
+    // Update PES_packet_length if non-zero
+    const pesLen = (pkt[newPayloadStart + 4] << 8) | pkt[newPayloadStart + 5];
+    if (pesLen !== 0) {
+      const newLen = pesLen + 5;
+      pkt[newPayloadStart + 4] = (newLen >> 8) & 0xff;
+      pkt[newPayloadStart + 5] = newLen & 0xff;
+    }
+  }
+
+  return out;
+}
+
 module.exports = {
   buildMenuDisplaySet,
   extractFirstVideoPTS,
+  rewriteVideoPesDts,
   renderButtonBitmap,
   renderButtonPixels,
   convertTsBdFormat,
