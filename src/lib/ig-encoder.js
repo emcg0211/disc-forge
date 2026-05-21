@@ -263,13 +263,17 @@ function encodeWDS(windows) {
  * @param {object} opts
  * @param {number} opts.videoWidth
  * @param {number} opts.videoHeight
- * @param {number} opts.frameRate          - 4-bit frame rate code (0x40 = 24fps, 0x50 = 25fps, 0x60 = 29.97fps)
- * @param {number} opts.compositionNumber  - display set counter
- * @param {number} opts.compositionState   - 0=normal, 1=acq_point, 2=epoch_start, 3=epoch_continue
- * @param {boolean} opts.streamModel       - true=InMux (ODS in same clip as video, no timeout fields), false=OutOfMux (ODS from subpath, timeout fields present)
- * @param {boolean} opts.uiModel           - false=always-on, true=popup
- * @param {number} opts.userTimeoutMs      - user timeout in ms (0=infinite)
- * @param {Array<IGPage>} opts.pages       - page descriptors (see IGPage below)
+ * @param {number} opts.frameRate              - 4-bit frame rate code (0x40 = 24fps, 0x50 = 25fps, 0x60 = 29.97fps)
+ * @param {number} opts.compositionNumber      - display set counter
+ * @param {number} opts.compositionState       - 0=normal, 1=acq_point, 2=epoch_start, 3=epoch_continue
+ * @param {boolean} opts.streamModel           - false=InMux/Multiplexed (stream_model bit=0, IG in same clip as video,
+ *                                               requires compositionTimeoutPts/selectionTimeoutPts fields),
+ *                                               true=OutMux/Non-Multiplexed (stream_model bit=1, IG from SubPath, no PTS fields)
+ * @param {boolean} opts.uiModel               - false=always-on, true=popup
+ * @param {number}  opts.compositionTimeoutPts - (InMux only) PTS at which to display composition (90kHz ticks, default 0)
+ * @param {number}  opts.selectionTimeoutPts   - (InMux only) PTS at which selection times out (0=no timeout)
+ * @param {number} opts.userTimeoutMs          - user timeout in ms (0=infinite)
+ * @param {Array<IGPage>} opts.pages           - page descriptors (see IGPage below)
  * @returns {Buffer}
  *
  * IGPage: {
@@ -313,7 +317,7 @@ function encodeButton(btn) {
   //   act_sound(1) act_start(2) act_end(2)
   //   num_nav_cmds(2) [nav_cmds * 12]
   const navCmds = btn.navCmds || [];
-  const fixedSize = 2+2+1+2+2+2+2+2+2+2+2+1+1+2+2+1+1+2+2+2;  // = 37 bytes
+  const fixedSize = 2+2+1+2+2+2+2+2+2+2+2+1+1+2+2+1+1+2+2+2;  // = 35 bytes
   const buf = Buffer.alloc(fixedSize + navCmds.length * 12);
   let o = 0;
 
@@ -380,24 +384,35 @@ function encodeICS(opts) {
     videoWidth = 1920, videoHeight = 1080, frameRate = 0x40,
     compositionNumber = 0, compositionState = 2,
     streamModel = false, uiModel = false,
+    compositionTimeoutPts = 0, selectionTimeoutPts = 0,
     userTimeoutMs = 0, pages = [],
   } = opts;
 
-  // TODO: implement full ICS encoder
-  // This stub returns a minimal valid-header ICS with 0 pages (epoch_start signal only).
-  // A working implementation needs to serialize all page/bog/button fields.
-
   const icParts = [];
 
-  // stream_model(1) ui_model(1) reserved(6)
+  // stream_model(1) ui_model(1) reserved(6) = 1 byte
+  // streamModel=false → bit=0 → InMux/Multiplexed: IG in same clip, timeout fields present
+  // streamModel=true  → bit=1 → OutMux/Non-Multiplexed: IG in SubPath, no timeout fields
   icParts.push(Buffer.from([
     (streamModel ? 0x80 : 0x00) | (uiModel ? 0x40 : 0x00),
   ]));
 
-  // [stream_model==0: composition_timeout_pts(40) selection_timeout_pts(40)]
+  // InMux (stream_model=0): composition_timeout_pts and selection_timeout_pts.
+  // Each is encoded as: 7 reserved bits + 33-bit PTS value = 5 bytes.
+  // libbluray ig_decode.c line 291-294: bb_skip(7); read_u64(33) × 2.
   if (!streamModel) {
-    // infinite timeouts = all-zeros
-    icParts.push(Buffer.alloc(10));
+    const encPts = (pts) => {
+      const b = Buffer.alloc(5);
+      // 7 reserved zero bits in top of byte 0, then 33-bit PTS
+      b[0] = Math.floor(pts / 0x100000000) & 0x01; // bit 32 of PTS
+      b[1] = (pts >>> 24) & 0xFF;
+      b[2] = (pts >>> 16) & 0xFF;
+      b[3] = (pts >>>  8) & 0xFF;
+      b[4] =  pts         & 0xFF;
+      return b;
+    };
+    icParts.push(encPts(compositionTimeoutPts));
+    icParts.push(encPts(selectionTimeoutPts));
   }
 
   // user_timeout_duration (24-bit, in 90kHz ticks)
@@ -408,10 +423,10 @@ function encodeICS(opts) {
   utd[2] =  userTimeoutTicks        & 0xFF;
   icParts.push(utd);
 
-  // BD spec: number_of_composition_objects MUST appear here. Zero = no composition objects, decoder jumps to number_of_pages.
-  icParts.push(Buffer.from([0x00]));
-
-  // num_pages(8) + each page
+  // num_pages(8) + each page.
+  // libbluray _decode_interactive_composition reads user_timeout_duration then DIRECTLY
+  // num_pages — there is NO number_of_composition_objects byte at this level.
+  // (number_of_composition_objects exists inside each effect_info(), NOT here.)
   icParts.push(Buffer.from([pages.length]));
   pages.forEach(page => icParts.push(encodePage(page)));
 

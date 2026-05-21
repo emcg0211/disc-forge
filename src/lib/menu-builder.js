@@ -235,7 +235,8 @@ function buildMenuDisplaySet({ videoWidth = 1920, videoHeight = 1080, playlists 
       frameRate:        0x40,   // 24fps
       compositionNumber: 0,
       compositionState:  2,     // epoch_start
-      streamModel:       true,  // InMux: IG and ODS are in the same m2ts clip as video
+      streamModel:       false, // Multiplexed (stream_model=0): IG is in the same m2ts clip as video
+      compositionTimeoutPts: pts, // display at video PTS so hardware doesn't discard as expired
       uiModel:           false,
       userTimeoutMs:     0,
       pages: [{

@@ -943,7 +943,7 @@ function titlebarHTML(tools) {
     <div class="titlebar-brand">
       <div class="titlebar-logo">💿</div>
       <span class="titlebar-name">Disc Forge</span>
-      <span class="titlebar-version">1.10.7</span>
+      <span class="titlebar-version">1.10.8</span>
     </div>
     <div class="titlebar-spacer"></div>
     <div class="titlebar-tools">
@@ -2226,7 +2226,8 @@ function welcomeModalHTML() {
 // ── About Modal ───────────────────────────────────────────────────────────────
 function aboutModalHTML() {
   const versions = [
-    { v:'1.10.7', notes:['ICS number_of_composition_objects fix: BD spec requires a 1-byte num_composition_objects field between user_timeout_duration and num_pages in the InteractiveComposition structure; the missing byte caused decoders to misparse num_pages as num_composition_objects, consume 8 bytes of page data as a fake composition_object, then read uo_mask[6]=0x00 as num_pages → zero pages → zero buttons → IG menu invisible on hardware', 'ICS segment is now 1 byte longer (142 bytes, was 141)', 'Unit test Phase 6 added: verifies num_composition_objects=0x00 at ICS[19] (InMux) and ICS[29] (OutMux) before num_pages'] },
+    { v:'1.10.8', notes:['CRITICAL: Removed spurious number_of_composition_objects byte from ICS encodeICS() — libbluray ig_decode.c reads user_timeout_duration then DIRECTLY num_pages; there is no such field at the interactive_composition() level. The spurious 0x00 byte was being decoded as num_pages=0 → zero pages → zero buttons on all hardware players (LG + Xbox both affected)', 'CRITICAL: Fixed stream_model to 0 (Multiplexed/InMux) for our in-mux disc architecture — v1.10.6 had incorrectly set stream_model=1 (OutMux), which tells hardware to look for composition objects in a SubPath that does not exist on our disc', 'Fixed composition_timeout_pts: now passes actual video PTS as composition_timeout_pts in the InMux 10-byte timeout block, preventing hardware from discarding the composition as expired (was previously all-zeros which could be interpreted as PTS=0, already in the past)', 'Libbluray source validation: ig_decode.c and pg_decode.c used as ground truth for all ICS/PDS/WDS/ODS field layouts', 'Unit tests: Phase 5 updated to test correct InMux/OutMux byte encoding with PTS; Phase 6 rewritten to assert num_pages immediately follows user_timeout_duration (81 tests, up from 72)'] },
+    { v:'1.10.7', notes:['ICS number_of_composition_objects fix (SUPERSEDED — the byte was actually wrong; see v1.10.8)', 'ICS segment byte added between user_timeout_duration and num_pages; this turned out to be a spurious byte that caused decoders to read num_pages=0'] },
     { v:'1.10.6', notes:['ICS InMux stream_model fix: ICS interaction_model byte bit7 now=1 (InMux), was 0 (OutOfMux with composition_timeout_pts=0 → hardware discarded overlay as expired)', 'MPLS still_mode fix: patchMplsForStill now writes 0x01 to byte[31] (infinite still); prior code wrote to reserved bits of byte[30] leaving byte[31]=0x00 (no-still)', 'Root cause confirmed via byte-level comparison against Beach Boys 50 Live (2012, Eagle Rock) hardware-verified reference disc'] },
     { v:'1.10.5', notes:['PMT IG stream declaration fix: hardware demuxers require the PMT to declare stream_type=0x91 PID=0x1400; CLPI/MPLS alone are not sufficient', 'patchPmtForIG() appends the IG ES entry to the PMT and rewrites the MPEG-2 CRC_32', 'Root cause: LG BD player test — menu background loaded but IG buttons not rendered, direction keys silently ignored'] },
     { v:'1.10.4', notes:['patchMplsForStill off-by-one fix: still_mode bits 6-5 now written to correct byte piOff+30', 'Retina 2x display support in verify_menu_buttons.py'] },
@@ -2257,7 +2258,7 @@ function aboutModalHTML() {
     '<div style="text-align:center;margin-bottom:16px">' +
     '<div style="font-size:40px;margin-bottom:6px">💿</div>' +
     '<div class="modal-title" style="font-size:20px">Disc Forge</div>' +
-    '<div style="font-size:12px;color:var(--gold);font-weight:600;margin-bottom:4px">Version 1.10.7</div>' +
+    '<div style="font-size:12px;color:var(--gold);font-weight:600;margin-bottom:4px">Version 1.10.8</div>' +
     '<div style="font-size:11px;color:var(--text-tertiary)">Professional Blu-ray authoring for macOS</div>' +
     '</div>' +
     '<div style="max-height:320px;overflow-y:auto;border-top:1px solid var(--border-dim);border-bottom:1px solid var(--border-dim);padding:12px 0;margin-bottom:14px">' +

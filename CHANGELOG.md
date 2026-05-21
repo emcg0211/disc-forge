@@ -1,6 +1,47 @@
 # Changelog
 
-## v1.10.7 — 2026-05-20
+## v1.10.8 — 2026-05-20
+
+**Full IG byte audit via libbluray source validation — two critical ICS encoder bugs found and fixed**
+
+Ground truth: libbluray `src/libbluray/decoders/ig_decode.c` + `pg_decode.c` compared byte-for-byte
+against binary extracted from v1.10.7 disc (PID 0x1400 from 00099.m2ts). Both bugs independently
+confirmed in the binary. 81 unit tests pass (up from 72).
+
+### Bug 1 — CRITICAL: Spurious byte causes `num_pages = 0` (all buttons silently lost)
+
+- **Symptom**: LG + Xbox — navy background renders, zero IG buttons, direction keys ignored.
+- **Root cause**: `encodeICS()` inserted a spurious `0x00` byte between `user_timeout_duration`
+  and `num_pages`, labeled "number_of_composition_objects". This field does NOT exist at the
+  `interactive_composition()` level in the BD spec or in libbluray `_decode_interactive_composition`
+  (ig_decode.c lines 296–308). The function reads `user_timeout_duration(3)` then DIRECTLY
+  `num_pages(1)`. The spurious byte was read as `num_pages = 0` → zero pages → zero buttons.
+  `number_of_composition_objects` is a field inside `effect_info()` (inside `in_effects`/`out_effects`
+  per page), NOT inside `interactive_composition()` directly.
+- **Binary proof**: v1.10.7 ICS bytes [19]=0x00 (spurious), [20]=0x01 (actual pages.length, never read).
+- **Fix**: Removed the `icParts.push(Buffer.from([0x00]))` line from `encodeICS()`.
+
+### Bug 2 — CRITICAL: stream_model = 1 (OutMux) for an in-mux disc
+
+- **Symptom**: Hardware looks for IG composition objects in a SubPath that does not exist.
+- **Root cause**: `menu-builder.js` called `encodeICS()` with `streamModel: true`, which writes
+  interaction_model byte bit7=1 (stream_model=1 = Non-Multiplexed / OutMux). Our disc has the IG
+  stream at PID 0x1400 embedded IN the main clip (00099.m2ts) — that is Multiplexed (InMux). For
+  OutMux, hardware expects IG composition objects in a separate SubPath clip; ours has none.
+  v1.10.6 introduced this by looking at the Beach Boys reference disc (which uses a SubPath) and
+  copying its stream_model=1 without realising that disc uses OutMux architecture.
+- **Fix**: Changed to `streamModel: false` → bit=0 → stream_model=0 (Multiplexed/InMux).
+- **Related fix**: With stream_model=0 (InMux), the ICS 10-byte timeout block is written.
+  `composition_timeout_pts` now receives the actual video PTS (from `extractFirstVideoPTS`),
+  ensuring hardware doesn't discard the composition as expired (pts=0 < video PTS ≈ 54,000,000).
+
+### Tests
+- Phase 5 rewritten: tests Multiplexed vs Non-Multiplexed bit, composition_timeout_pts encoding.
+- Phase 6 rewritten: asserts num_pages immediately follows user_timeout_duration at correct offsets.
+
+---
+
+## v1.10.7 — 2026-05-20 *(SUPERSEDED — v1.10.8 reverts and corrects the ICS byte change)*
 
 **ICS number_of_composition_objects field fix (missing byte caused zero-button parse on hardware)**
 

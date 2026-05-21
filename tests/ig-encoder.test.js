@@ -336,18 +336,21 @@ console.log('\n=== 4f: MPEG-TS packetizer ===');
 
 // ─── Phase 5: v1.10.6 regression — InMux stream_model and still_mode ─────────
 
-console.log('\n=== 5a: ICS stream_model=InMux (v1.10.6 fix) ===');
+console.log('\n=== 5a: ICS stream_model byte (Multiplexed vs Non-Multiplexed) ===');
 
 {
-  // With streamModel=true (InMux): interaction_model byte bit-7 must be 1.
-  // With streamModel=false (OutOfMux): bit-7 is 0, and 10 bytes of timeout fields follow.
-  // Root-cause: OutOfMux + composition_timeout_pts=0 means composition expires at PTS=0,
-  // which the hardware already passed (video PTS ~54,000,000). Hardware discards IG silently.
-  // Ref: Beach Boys 50 Live reference disc — IG clips use InMux (stream in same m2ts).
+  // API convention: streamModel=false → stream_model bit=0 → Multiplexed/InMux
+  //                 streamModel=true  → stream_model bit=1 → Non-Multiplexed/OutMux
+  // libbluray ig_decode.c line 285-294: stream_model=0 reads 10-byte timeout block;
+  //                                     stream_model=1 does NOT.
+  // For our disc: IG is in the same m2ts clip as video → use streamModel=false (InMux, bit=0).
+  // compositionTimeoutPts must equal the video PTS so hardware doesn't discard the composition
+  // as expired (video starts at PTS≈54,000,000; composition_timeout_pts=0 would be in the past).
   const makeICS = (streamModel) => encodeICS({
     videoWidth: 1920, videoHeight: 1080, frameRate: 0x40,
     compositionNumber: 0, compositionState: 2,
     streamModel, uiModel: false, userTimeoutMs: 0,
+    compositionTimeoutPts: 54000000,
     pages: [{ id: 0, version: 0, uoMask: Buffer.alloc(8),
       paletteIdRef: 0, defaultSelectedButtonIdRef: 0, defaultActivatedButtonIdRef: 0xFFFF,
       bogs: [{ defaultValidButtonIdRef: 0, buttons: [
@@ -361,16 +364,23 @@ console.log('\n=== 5a: ICS stream_model=InMux (v1.10.6 fix) ===');
   // ICS byte layout (segment):
   //   [0]=type  [1-2]=length  [3-7]=VideoDescriptor(5)  [8-10]=CompositionDescriptor(3)
   //   [11]=SequenceDescriptor  [12-14]=data_length  [15]=interaction_model byte
-  const icsInMux  = makeICS(true);
-  const icsOutMux = makeICS(false);
+  const icsMux    = makeICS(false);  // streamModel=false → stream_model=0 (Multiplexed, InMux)
+  const icsNonMux = makeICS(true);   // streamModel=true  → stream_model=1 (Non-Multiplexed, OutMux)
 
-  assertEq(icsInMux[15] & 0x80, 0x80, 'InMux  ICS[15] stream_model bit = 1 (0x80)');
-  assertEq(icsOutMux[15] & 0x80, 0x00, 'OutMux ICS[15] stream_model bit = 0 (0x00)');
-  // InMux ICS is 10 bytes shorter (no timeout fields)
-  assert(icsInMux.length === icsOutMux.length - 10, 'InMux ICS is 10 bytes shorter than OutMux (no timeouts)');
+  assertEq(icsMux[15]    & 0x80, 0x00, 'Multiplexed    ICS[15] stream_model bit = 0 (InMux)');
+  assertEq(icsNonMux[15] & 0x80, 0x80, 'Non-Multiplexed ICS[15] stream_model bit = 1 (OutMux)');
+  // Multiplexed ICS is 10 bytes longer (has timeout fields per libbluray ig_decode.c:289-294)
+  assert(icsMux.length === icsNonMux.length + 10, 'Multiplexed ICS is 10 bytes longer (has timeout fields)');
   // Both must still be epoch_start
-  assertEq(icsInMux[10], 0x80, 'InMux  ICS composition_state = 0x80 (epoch_start)');
-  assertEq(icsOutMux[10], 0x80, 'OutMux ICS composition_state = 0x80 (epoch_start)');
+  assertEq(icsMux[10],    0x80, 'Multiplexed    ICS composition_state = 0x80 (epoch_start)');
+  assertEq(icsNonMux[10], 0x80, 'Non-Multiplexed ICS composition_state = 0x80 (epoch_start)');
+  // Multiplexed: composition_timeout_pts encoded at [16-20] (7 zero bits + 33-bit value)
+  // PTS=54000000=0x0337F980: byte[0]=0x00, byte[1]=0x03, byte[2]=0x37, byte[3]=0xF9, byte[4]=0x80
+  assertEq(icsMux[16], 0x00, 'Multiplexed ICS[16] composition_timeout_pts byte 0 = 0x00');
+  assertEq(icsMux[17], 0x03, 'Multiplexed ICS[17] composition_timeout_pts byte 1 = 0x03');
+  assertEq(icsMux[18], 0x37, 'Multiplexed ICS[18] composition_timeout_pts byte 2 = 0x37');
+  assertEq(icsMux[19], 0xF9, 'Multiplexed ICS[19] composition_timeout_pts byte 3 = 0xF9');
+  assertEq(icsMux[20], 0x80, 'Multiplexed ICS[20] composition_timeout_pts byte 4 = 0x80');
 }
 
 console.log('\n=== 5b: patchMplsForStill writes still_mode=1 to byte[31] (v1.10.6 fix) ===');
@@ -409,14 +419,14 @@ console.log('\n=== 5b: patchMplsForStill writes still_mode=1 to byte[31] (v1.10.
   assert((byte30 & 0x7F) === 0x00, 'byte[30] reserved bits = 0 (only RAF bit kept)');
 }
 
-// ─── Phase 6: v1.10.7 regression — number_of_composition_objects field ────────
-// Bug: encodeICS was missing the number_of_composition_objects byte (1 byte)
-// between user_timeout_duration and num_pages. Hardware decoders read that
-// missing byte as num_composition_objects, ate 8 bytes of page data as a fake
-// composition_object, then read uo_mask[6]=0x00 as num_pages → zero pages →
-// zero buttons → IG menu invisible on hardware.
+// ─── Phase 6: v1.10.8 fix — remove spurious number_of_composition_objects byte ─
+// v1.10.7 BUG: encodeICS inserted a spurious 0x00 byte between user_timeout_duration
+// and num_pages. libbluray _decode_interactive_composition (ig_decode.c:296-302) reads
+// user_timeout_duration then DIRECTLY num_pages — there is NO number_of_composition_objects
+// field at this level. That field exists inside effect_info(), NOT in interactive_composition().
+// Result: decoder read the 0x00 as num_pages → 0 pages → 0 buttons on all hardware.
 
-console.log('\n=== 6: ICS num_composition_objects field (v1.10.7 fix) ===');
+console.log('\n=== 6: ICS num_pages immediately follows user_timeout_duration (v1.10.8 fix) ===');
 
 {
   const makeICS1Page = (streamModel) => encodeICS({
@@ -441,22 +451,26 @@ console.log('\n=== 6: ICS num_composition_objects field (v1.10.7 fix) ===');
   //   [11]    SequenceDescriptor (1 byte)
   //   [12-14] data_length (3 bytes)
   //   [15]    interaction_model byte (stream_model | ui_model)
-  //   InMux:  [16-18] user_timeout_duration; [19] num_composition_objects; [20] num_pages
-  //   OutMux: [16-25] timeout fields(10); [26-28] user_timeout_duration; [29] num_comp_objs; [30] num_pages
+  //   NonMux (streamModel=true,  stream_model=1): [16-18]=user_timeout_duration; [19]=num_pages
+  //   Mux    (streamModel=false, stream_model=0): [16-25]=timeout(10); [26-28]=utd; [29]=num_pages
 
-  const icsInMux  = makeICS1Page(true);
-  const icsOutMux = makeICS1Page(false);
+  const icsNonMux = makeICS1Page(true);   // stream_model=1, no timeout block
+  const icsMux    = makeICS1Page(false);  // stream_model=0, with 10-byte timeout block
 
-  // InMux: num_composition_objects at [19] = 0x00, num_pages at [20] = 0x01
-  assertEq(icsInMux[19], 0x00, 'InMux  ICS[19] num_composition_objects = 0x00');
-  assertEq(icsInMux[20], 0x01, 'InMux  ICS[20] num_pages = 0x01');
+  // Non-Multiplexed (stream_model=1): num_pages directly at [19] — no spurious byte
+  assertEq(icsNonMux[16], 0x00, 'NonMux ICS[16] user_timeout_duration[0] = 0x00');
+  assertEq(icsNonMux[17], 0x00, 'NonMux ICS[17] user_timeout_duration[1] = 0x00');
+  assertEq(icsNonMux[18], 0x00, 'NonMux ICS[18] user_timeout_duration[2] = 0x00');
+  assertEq(icsNonMux[19], 0x01, 'NonMux ICS[19] num_pages = 0x01 (no spurious byte between utd and num_pages)');
 
-  // OutMux: num_composition_objects at [29] = 0x00, num_pages at [30] = 0x01
-  assertEq(icsOutMux[29], 0x00, 'OutMux ICS[29] num_composition_objects = 0x00');
-  assertEq(icsOutMux[30], 0x01, 'OutMux ICS[30] num_pages = 0x01');
+  // Multiplexed (stream_model=0): num_pages directly at [29] after 10-byte timeout block
+  assertEq(icsMux[26], 0x00, 'Mux ICS[26] user_timeout_duration[0] = 0x00');
+  assertEq(icsMux[27], 0x00, 'Mux ICS[27] user_timeout_duration[1] = 0x00');
+  assertEq(icsMux[28], 0x00, 'Mux ICS[28] user_timeout_duration[2] = 0x00');
+  assertEq(icsMux[29], 0x01, 'Mux ICS[29] num_pages = 0x01 (no spurious byte)');
 
-  // InMux is still 10 bytes shorter (no timeout fields) — relative difference unchanged by +1 fix
-  assert(icsInMux.length === icsOutMux.length - 10, 'InMux still 10 bytes shorter than OutMux after v1.10.7 fix');
+  // Multiplexed still 10 bytes longer than Non-Multiplexed (timeout block, unchanged by fix)
+  assert(icsMux.length === icsNonMux.length + 10, 'Mux ICS 10 bytes longer than NonMux (timeout block)');
 }
 
 // ─── Summary ──────────────────────────────────────────────────────────────────
