@@ -1,5 +1,30 @@
 # Changelog
 
+## v1.11.0 — 2026-05-21
+
+**Autoplay-only default; menus promoted to beta opt-in**
+
+Discs now build without menus by default for maximum hardware compatibility.
+Menus are available as an opt-in beta, gated by a new toggle in Project Settings.
+
+### Changes
+
+- **Autoplay-only is the new default**: menus are OFF by default. Discs build as
+  clean autoplay titles that work reliably across all tested hardware players.
+- **Menus available as beta opt-in**: enable "Menus (Beta — may not work on all players)"
+  in Project Settings → Video Format to access the full menu builder (Menu tab) and
+  the interactive episode menu (IG) option. Known compatibility issues on some hardware
+  remain; use for testing only until further notice.
+- **All v1.10.x menu fixes preserved**: the complete IG encoder fix history
+  (v1.10.2–v1.10.11) is intact on the beta menu path — nothing was removed.
+- **Menu tab hidden when menus are disabled**: re-enable the toggle to restore access
+  to theme, typography, and preview controls.
+- **`menusEnabled` flag added to build pipeline** (`build-multi-title-disc` IPC handler):
+  `addMenuToDisc()` is now gated by both `useIGMenu` and `menusEnabled`.
+- **v1.10.12 CC session** will continue menu fix work in parallel on the beta path.
+
+---
+
 ## v1.10.11 — 2026-05-21
 
 **Toast reference disc audit — three m2ts arrival timestamp / sound ID bugs fixed**

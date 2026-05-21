@@ -3751,7 +3751,7 @@ async function addMenuToDisc(bdFolder, numEpisodes, workDir, igMenuConfig = {}) 
 // Pipeline per episode: FFmpeg (libx264/AC3) → mkvmerge → tsMuxeR (--blu-ray)
 // Then merge all BDMV outputs and fix navigation.
 
-ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discName, fastEncode, resolution, useSplash, splashPngPath = null, splashDuration = 5, splashColor = '1a1a2e', useIGMenu = false, igMenuConfig = {} }) => {
+ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discName, fastEncode, resolution, useSplash, splashPngPath = null, splashDuration = 5, splashColor = '1a1a2e', useIGMenu = false, menusEnabled = false, igMenuConfig = {} }) => {
   if (!TOOLS.ffmpeg)   return { error: 'FFmpeg not found.\n\nInstall: brew install ffmpeg' };
   if (!TOOLS.tsmuxer)  return { error: 'tsMuxeR not found.\n\nInstall: brew install --cask tsmuxer' };
   if (!TOOLS.mkvmerge) return { error: 'mkvmerge not found.\n\nInstall: brew install mkvtoolnix' };
@@ -4360,7 +4360,7 @@ ipcMain.handle('build-multi-title-disc', async (_, { episodes, outputDir, discNa
   }
 
   // ── Step 4d: Interactive IG menu (experimental) ───────────────────────────
-  if (useIGMenu) {
+  if (useIGMenu && menusEnabled) {
     sendLog('[MT] Adding interactive IG menu (experimental)');
     try {
       await addMenuToDisc(bdFolder, episodes.length, workDir, igMenuConfig);

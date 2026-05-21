@@ -49,6 +49,7 @@ const TABS = [
 let state = {
   tab: 0,
   lightMode: true,
+  menusEnabled: false,
   systemFonts: [],  // populated on boot from installed fonts
   tools: { ffmpeg:{found:false}, ffprobe:{found:false}, tsmuxer:{found:false}, makemkv:{found:false} },
   building: false, buildSteps: [], buildCurrentStep: -1,
@@ -459,7 +460,8 @@ async function startBuild() {
       splashPngPath: p.splashPngPath || null,
       splashDuration: p.splashDuration || 5,
       splashColor: p.splashColor || '1a1a2e',
-      useIGMenu: p.useIGMenu || false,
+      useIGMenu: state.menusEnabled && (p.useIGMenu || false),
+      menusEnabled: state.menusEnabled || false,
       igMenuConfig: p.igMenuConfig || {},
     });
   } else {
@@ -923,7 +925,7 @@ function buildHTML() {
           ${tab===2 ? pageAudio(p, state.form.audio) : ''}
           ${tab===3 ? pageSubtitles(p, state.form.subtitle) : ''}
           ${tab===4 ? pageChapters(p, state.form.chapter) : ''}
-          ${tab===5 ? pageMenu(p) : ''}
+          ${tab===5 && state.menusEnabled ? pageMenu(p) : ''}
           ${tab===6 ? pageExtras(p, state.form.extras) : ''}
         </div>
       </div>
@@ -943,7 +945,7 @@ function titlebarHTML(tools) {
     <div class="titlebar-brand">
       <div class="titlebar-logo">💿</div>
       <span class="titlebar-name">Disc Forge</span>
-      <span class="titlebar-version">1.10.9</span>
+      <span class="titlebar-version">1.11.0</span>
     </div>
     <div class="titlebar-spacer"></div>
     <div class="titlebar-tools">
@@ -1087,7 +1089,7 @@ function tabbarHTML(p, activeTab) {
   const counts = [0, 0, p.audioTracks.length, p.subtitleTracks.length, p.chapters.length, 0, p.extras.length];
   return `<div class="tabbar">
     ${TABS.map((t,i)=>`
-      <button class="tab-btn ${i===activeTab?'active':''}" data-tab="${i}">
+      <button class="tab-btn ${i===activeTab?'active':''}" data-tab="${i}"${i===5&&!state.menusEnabled?' style="display:none"':''}>
         <span class="tab-icon">${t.icon}</span>
         ${t.label}
         ${counts[i]>0?`<span class="tab-count">${counts[i]}</span>`:''}
@@ -1150,13 +1152,17 @@ function pageProject(p) {
         </div>
         <div style="margin-top:12px">
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--text-secondary)">
+            <input type="checkbox" id="menus-enabled" ${state.menusEnabled ? 'checked' : ''} style="width:14px;height:14px">
+            Menus (Beta — may not work on all players)
+          </label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--text-secondary);margin-top:6px">
             <input type="checkbox" id="use-splash" ${p.useSplash ? 'checked' : ''} style="width:14px;height:14px">
             Add splash screen before playback
           </label>
-          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--text-secondary);margin-top:6px">
+          ${state.menusEnabled ? `<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--text-secondary);margin-top:6px">
             <input type="checkbox" id="use-ig-menu" ${p.useIGMenu ? 'checked' : ''} style="width:14px;height:14px">
             Add interactive episode menu [experimental]
-          </label>
+          </label>` : ''}
           ${p.useIGMenu ? `
           <div style="background:var(--bg-secondary);padding:10px 12px;border-radius:8px;margin-top:8px;display:flex;flex-direction:column;gap:8px">
             <div style="display:flex;gap:10px;align-items:center">
@@ -2226,6 +2232,8 @@ function welcomeModalHTML() {
 // ── About Modal ───────────────────────────────────────────────────────────────
 function aboutModalHTML() {
   const versions = [
+    { v:'1.11.0', notes:['Autoplay-only is now the default — discs build without menus by default for maximum hardware compatibility', 'Menus available as opt-in beta: enable "Menus (Beta)" in Project Settings to access menu design and interactive episode menus', 'Known compatibility issues on some players remain; v1.10.x menu fixes are all preserved on the beta path', 'Menu tab is hidden when menus are disabled; re-enable to access full menu builder', 'v1.10.12+ session will continue menu fix work in parallel'] },
+    { v:'1.10.11', notes:['Non-monotonic IG arrival timestamps fixed (T-STD violation causing LG BP350 to discard all IG packets)', 'copy_permission_indicator fixed to 0 (was 2 "copy once" — video packets use 0)', 'selectedSoundId/activatedSoundId fixed to 0xFF (no sound) — was 0, which triggers missing Sound.bdmv lookup on some players', '107 unit tests pass'] },
     { v:'1.10.9', notes:['Reverted composition_timeout_pts from video PTS back to 0 — setting it to the video PTS in v1.10.8 caused LG hardware to reject the disc at load time (disc not recognised, navy background never displayed), because the composition appears expired immediately upon parsing. composition_timeout_pts=0 is the universal no-timeout convention and is what all reference discs use. Expected result: disc loads, navy background plays, no interactive buttons (PDS/WDS/ODS audit in next session).'] },
     { v:'1.10.8', notes:['CRITICAL: Removed spurious number_of_composition_objects byte from ICS encodeICS() — libbluray ig_decode.c reads user_timeout_duration then DIRECTLY num_pages; there is no such field at the interactive_composition() level. The spurious 0x00 byte was being decoded as num_pages=0 → zero pages → zero buttons on all hardware players (LG + Xbox both affected)', 'CRITICAL: Fixed stream_model to 0 (Multiplexed/InMux) for our in-mux disc architecture — v1.10.6 had incorrectly set stream_model=1 (OutMux), which tells hardware to look for composition objects in a SubPath that does not exist on our disc', 'Fixed composition_timeout_pts: now passes actual video PTS as composition_timeout_pts in the InMux 10-byte timeout block, preventing hardware from discarding the composition as expired (was previously all-zeros which could be interpreted as PTS=0, already in the past)', 'Libbluray source validation: ig_decode.c and pg_decode.c used as ground truth for all ICS/PDS/WDS/ODS field layouts', 'Unit tests: Phase 5 updated to test correct InMux/OutMux byte encoding with PTS; Phase 6 rewritten to assert num_pages immediately follows user_timeout_duration (81 tests, up from 72)'] },
     { v:'1.10.7', notes:['ICS number_of_composition_objects fix (SUPERSEDED — the byte was actually wrong; see v1.10.8)', 'ICS segment byte added between user_timeout_duration and num_pages; this turned out to be a spurious byte that caused decoders to read num_pages=0'] },
@@ -2259,8 +2267,8 @@ function aboutModalHTML() {
     '<div style="text-align:center;margin-bottom:16px">' +
     '<div style="font-size:40px;margin-bottom:6px">💿</div>' +
     '<div class="modal-title" style="font-size:20px">Disc Forge</div>' +
-    '<div style="font-size:12px;color:var(--gold);font-weight:600;margin-bottom:4px">Version 1.10.9</div>' +
-    '<div style="font-size:11px;color:var(--text-tertiary)">Professional Blu-ray authoring for macOS</div>' +
+    '<div style="font-size:12px;color:var(--gold);font-weight:600;margin-bottom:4px">Version 1.11.0</div>' +
+    '<div style="font-size:11px;color:var(--text-tertiary)">Disc Forge v1.11.0 — Autoplay Blu-ray authoring with experimental menu support</div>' +
     '</div>' +
     '<div style="max-height:320px;overflow-y:auto;border-top:1px solid var(--border-dim);border-bottom:1px solid var(--border-dim);padding:12px 0;margin-bottom:14px">' +
     '<div style="font-size:10px;letter-spacing:.1em;color:var(--text-tertiary);margin-bottom:10px;text-align:center">VERSION HISTORY</div>' +
@@ -2362,6 +2370,7 @@ function attachListeners() {
   document.getElementById('proj-res')?.addEventListener('change',   e => setPrj({ resolution: e.target.value }));
   document.getElementById('force-transcode')?.addEventListener('change', e => setPrj({ forceTranscode: e.target.checked }));
   document.getElementById('proj-vcodec')?.addEventListener('change',e => setPrj({ videoFormat: e.target.value }));
+  document.getElementById('menus-enabled')?.addEventListener('change', e => setState({ menusEnabled: e.target.checked }));
   document.getElementById('use-splash')?.addEventListener('change',  e => setPrj({ useSplash: e.target.checked }));
   document.getElementById('use-ig-menu')?.addEventListener('change', e => setPrj({ useIGMenu: e.target.checked }));
   document.getElementById('ig-menu-title')?.addEventListener('input', e => setPrj({ igMenuConfig: { ...state.project.igMenuConfig, title: e.target.value } }));
