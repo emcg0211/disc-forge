@@ -28,13 +28,15 @@ if (!bdFolder || !numEpisodes) {
 const {
   patchClpiForIG, patchMplsForIG, patchMplsClipName, patchMplsForStill,
   buildMenuDisplaySet, injectIGIntoM2ts, patchPmtForIG, extractFirstVideoPTS,
+  rewriteVideoPesDts,
 } = require(path.join(__dirname, '../src/lib/menu-builder'));
 
-function runTsMuxer(h264Path, outBdmv) {
-  const metaPath = h264Path + '.meta';
+function runTsMuxer(mkvPath, outBdmv) {
+  const metaPath = mkvPath + '.meta';
+  // track=1 required for MKV container; fps=24 matches encoding
   fs.writeFileSync(metaPath,
     `MUXOPT --no-pcr-on-video-pid --new-audio-pes --blu-ray\n` +
-    `V_MPEG4/ISO/AVC, "${h264Path}", level=4.1, insertSEI, contSPS, lang=und, fps=24\n`
+    `V_MPEG4/ISO/AVC, "${mkvPath}", track=1, level=4.1, insertSEI, contSPS, lang=und, fps=24\n`
   );
   const r = spawnSync(tsmuxerPath, [metaPath, outBdmv], { stdio: ['ignore', 'pipe', 'pipe'] });
   if (r.status !== 0) throw new Error(`tsMuxeR failed: ${r.stderr.toString().slice(-300)}`);
@@ -53,30 +55,30 @@ async function addMenu() {
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'menu_inject_'));
 
   // ── Step 1: Generate preload clip (1s, no IG) ────────────────────────────
-  // This clip plays FIRST in MovieObject so VLC initializes its vout before
-  // the menu clip (00099) fires the IG overlay callbacks.
-  const preH264 = path.join(workDir, 'pre_bg.h264');
+  // MKV with B-frames so tsMuxeR writes PTS+DTS (flags2=0xC0) for I/P frames.
+  // B-frame PUSI packets are patched by rewriteVideoPesDts in step 6.
+  const preMkv = path.join(workDir, 'pre_bg.mkv');
   console.log('[MenuInject] Generating 1s preload video...');
   const ffPre = spawnSync(ffmpegPath, [
     '-y', '-f', 'lavfi',
     '-i', 'color=c=0x1a1a2e:size=1920x1080:rate=24',
     '-t', '1',
     '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
-    '-preset', 'ultrafast', '-crf', '28',
-    preH264,
+    '-preset', 'medium', '-crf', '28', '-bf', '2', '-g', '24',
+    preMkv,
   ], { stdio: ['ignore', 'ignore', 'pipe'] });
   if (ffPre.status !== 0) throw new Error(`ffmpeg preload bg failed: ${ffPre.stderr.toString().slice(-300)}`);
 
   // ── Step 2: Generate menu clip (5s, will receive IG injection) ───────────
-  const menuH264 = path.join(workDir, 'menu_bg.h264');
+  const menuMkv = path.join(workDir, 'menu_bg.mkv');
   console.log('[MenuInject] Generating 5s menu background video...');
   const ffMenu = spawnSync(ffmpegPath, [
     '-y', '-f', 'lavfi',
     '-i', 'color=c=0x1a1a2e:size=1920x1080:rate=24',
     '-t', '5',
     '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
-    '-preset', 'ultrafast', '-crf', '28',
-    menuH264,
+    '-preset', 'medium', '-crf', '28', '-bf', '2', '-g', '24',
+    menuMkv,
   ], { stdio: ['ignore', 'ignore', 'pipe'] });
   if (ffMenu.status !== 0) throw new Error(`ffmpeg menu bg failed: ${ffMenu.stderr.toString().slice(-300)}`);
 
@@ -87,10 +89,10 @@ async function addMenu() {
   fs.mkdirSync(menuBdmv, { recursive: true });
 
   console.log('[MenuInject] Running tsMuxeR for preload clip...');
-  const prePaths  = runTsMuxer(preH264,  preBdmv);
+  const prePaths  = runTsMuxer(preMkv,  preBdmv);
 
   console.log('[MenuInject] Running tsMuxeR for menu clip...');
-  const menuPaths = runTsMuxer(menuH264, menuBdmv);
+  const menuPaths = runTsMuxer(menuMkv, menuBdmv);
 
   // ── Step 4: Patch preload MPLS (clip rename only, NO IG, NO still) ───────
   const rawPreMpls     = fs.readFileSync(prePaths.mpls);
@@ -105,13 +107,15 @@ async function addMenu() {
   const igClpi  = patchClpiForIG(rawClpi);
   if (!igClpi) throw new Error('patchClpiForIG failed — unexpected CLPI structure');
 
-  // ── Step 6: Build IG display set and inject into menu m2ts ───────────────
+  // ── Step 6: Ensure all video PES have PTS+DTS, then inject IG ───────────
+  // tsMuxeR writes DTS only for I/P frames; B-frames get PTS-only (flags2=0x80).
+  // rewriteVideoPesDts patches B-frame PUSI packets by stealing AF stuffing.
   const playlists = Array.from({ length: numEpisodes }, (_, i) => i + 1);
   const labels    = playlists.map((_, i) => `Play Episode ${i + 1}`);
 
-  const videoM2ts = fs.readFileSync(menuPaths.m2ts);
-  const videoPts  = extractFirstVideoPTS(videoM2ts);
-  // Fire IG immediately when 00099 starts — vout is already initialized from preload.
+  const rawVideoM2ts = fs.readFileSync(menuPaths.m2ts);
+  const videoM2ts    = rewriteVideoPesDts(rawVideoM2ts, 3750);
+  const videoPts     = extractFirstVideoPTS(videoM2ts);
   console.log(`[MenuInject] Video PTS: ${videoPts}`);
 
   const igTs       = buildMenuDisplaySet({ playlists, pts: videoPts, labels, ffmpegPath });
