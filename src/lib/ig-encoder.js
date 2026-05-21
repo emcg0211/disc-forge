@@ -356,11 +356,11 @@ function encodeButton(btn) {
   buf.writeUInt16BE(btn.normalStartObjId     || 0,  o); o += 2;
   buf.writeUInt16BE(btn.normalEndObjId       || 0,  o); o += 2;
   buf[o++] = btn.normalRepeat ? 0x80 : 0x00;
-  buf[o++] = btn.selectedSoundId             || 0;
+  buf[o++] = btn.selectedSoundId             ?? 0xFF;
   buf.writeUInt16BE(btn.selStartObjId        || 0,  o); o += 2;
   buf.writeUInt16BE(btn.selEndObjId          || 0,  o); o += 2;
   buf[o++] = btn.selRepeat ? 0x80 : 0x00;
-  buf[o++] = btn.activatedSoundId            || 0;
+  buf[o++] = btn.activatedSoundId            ?? 0xFF;
   buf.writeUInt16BE(btn.actStartObjId        || 0,  o); o += 2;
   buf.writeUInt16BE(btn.actEndObjId          || 0,  o); o += 2;
   buf.writeUInt16BE(navCmds.length,                 o); o += 2;

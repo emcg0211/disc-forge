@@ -606,6 +606,64 @@ console.log('\n=== 9: ICS PES DTS required (v1.10.10 fix) ===');
   }
 }
 
+console.log('\n=== 10: arrival timestamp fixes (v1.10.11) ===');
+{
+  const { convertTsBdFormat, injectIGIntoM2ts } = require(path.join(__dirname, '..', 'src', 'lib', 'menu-builder.js'));
+
+  // Fix 1: copy_permission_indicator must be 00 (bits[31:30] of 4-byte BD header)
+  const fakePkt = Buffer.alloc(188); fakePkt[0] = 0x47;
+  const bd = convertTsBdFormat(fakePkt, 1000);
+  const hdr = bd.readUInt32BE(0);
+  assertEq((hdr >>> 30) & 0x3, 0, 'copy_permission_indicator = 0 (no restriction)');
+
+  // Fix 2: arrival timestamps must be monotonically increasing
+  const bd2 = convertTsBdFormat(Buffer.concat([fakePkt, fakePkt]), 5000);
+  const arr0 = bd2.readUInt32BE(0) & 0x3FFFFFFF;
+  const arr1 = bd2.readUInt32BE(192) & 0x3FFFFFFF;
+  assert(arr1 > arr0, 'arrival timestamps are monotonically increasing (arr1 > arr0)');
+  assertEq(arr1 - arr0, 300, 'arrival timestamps spaced by 300 ticks (27MHz / 90kHz)');
+
+  // Fix 3: injectIGIntoM2ts derives baseTimestamp from last video packet before insertion
+  // Build a fake video m2ts: 12 packets with arrival timestamps 1000, 1300, ..., 4300
+  const videoM2ts = Buffer.alloc(12 * 192);
+  for (let i = 0; i < 12; i++) {
+    videoM2ts.writeUInt32BE(1000 + i * 300, i * 192);
+    videoM2ts[i * 192 + 4] = 0x47;
+  }
+  const igTs = Buffer.concat([fakePkt, fakePkt]);  // 2 TS packets
+  const combined = injectIGIntoM2ts(videoM2ts, igTs, 10);
+  // IG packets start at packet index 10; arrival of video pkt 9 = 1000 + 9*300 = 3700
+  // IG pkt 0 arrival should be 3700+300=4000, pkt 1 should be 4300
+  const igArr0 = combined.readUInt32BE(10 * 192) & 0x3FFFFFFF;
+  const igArr1 = combined.readUInt32BE(11 * 192) & 0x3FFFFFFF;
+  const vidBefore = videoM2ts.readUInt32BE(9 * 192) & 0x3FFFFFFF;  // 3700
+  assertEq(igArr0, vidBefore + 300, 'IG pkt[0] arrival = last video pkt arrival + 300');
+  assertEq(igArr1, vidBefore + 600, 'IG pkt[1] arrival monotonically follows pkt[0]');
+  // Video after the injection must not jump backwards
+  const vidAfterArr = combined.readUInt32BE(12 * 192) & 0x3FFFFFFF;  // original pkt 10
+  assertEq(vidAfterArr, 1000 + 10 * 300, 'video packets after injection are unmodified');
+}
+
+console.log('\n=== 11: sound IDs default to 0xFF (v1.10.11) ===');
+{
+  // encodeButton: omitting selectedSoundId/activatedSoundId must encode 0xFF, not 0
+  const btnBuf = encodeButton({ id: 0, navCmds: [] });
+  // Button layout (bytes from offset 0):
+  // btn_id(2) numericSelectValue(2) autoActionFlag(1) x(2) y(2)
+  // upper(2) lower(2) left(2) right(2) = 17 bytes
+  // normalStart(2) normalEnd(2) normalRepeat(1) selectedSoundId(1) = +6 → offset 23
+  const selSoundOff = 2 + 2 + 1 + 2 + 2 + 2 + 2 + 2 + 2 + 2 + 2 + 1;  // = 24
+  assertEq(btnBuf[selSoundOff],     0xFF, 'selectedSoundId defaults to 0xFF (no sound)');
+  // activatedSoundId is at: selStart(2) selEnd(2) selRepeat(1) = +5 after selSoundOff
+  const actSoundOff = selSoundOff + 1 + 2 + 2 + 1;  // = 29
+  assertEq(btnBuf[actSoundOff], 0xFF, 'activatedSoundId defaults to 0xFF (no sound)');
+
+  // Explicit 0x00 sound ID must be respected (not overwritten by ?? fallback)
+  const btnExplicit = encodeButton({ id: 0, selectedSoundId: 0, activatedSoundId: 0, navCmds: [] });
+  assertEq(btnExplicit[selSoundOff], 0x00, 'selectedSoundId=0 explicit value preserved');
+  assertEq(btnExplicit[actSoundOff], 0x00, 'activatedSoundId=0 explicit value preserved');
+}
+
 // ─── Summary ──────────────────────────────────────────────────────────────────
 
 console.log(`\n${'─'.repeat(50)}`);

@@ -1,5 +1,49 @@
 # Changelog
 
+## v1.10.11 — 2026-05-21
+
+**Toast reference disc audit — three m2ts arrival timestamp / sound ID bugs fixed**
+
+Ground truth: Toast-authored 2-button BD-ROM menu confirmed to render on consumer hardware.
+Field-by-field comparison logged to `/tmp/v11010_audit_findings.md`. All ICS/ODS/PDS/WDS
+structure fields matched; bugs were in the m2ts encapsulation layer.
+
+### BUG-1 — CRITICAL: Non-monotonic IG arrival timestamps (T-STD violation)
+
+- **Symptom**: LG BP350 discards all IG packets (timestamps appear to be "in the past").
+  Despite correct ICS/ODS/PDS structure, no buttons rendered on hardware.
+- **Root cause**: `injectIGIntoM2ts` called `convertTsBdFormat(igTs188)` with the default
+  `baseTimestamp=0`. Video packets surrounding the IG block have arrival timestamps of ~80M
+  (27MHz ticks). Injecting IG with arrivals 0→11,700 into that context violates the
+  BD T-STD requirement for monotonically increasing arrival timestamps.
+- **Fix**: `injectIGIntoM2ts` now reads the arrival timestamp of the last video packet before
+  the insertion point and passes `beforeArr + 300` as `baseTimestamp` to `convertTsBdFormat`.
+  IG packets now arrive in the range `(beforeArr+300) … (beforeArr + N×300)`, seamlessly
+  interleaved between surrounding video packets.
+
+### BUG-2 — CRITICAL: copy_permission_indicator = 2 ("copy once") on all IG packets
+
+- **Symptom**: Some hardware enforces BD copy protection at the IG overlay output stage;
+  "copy once" packets may be blocked from display. Video packets have copy_permission=0.
+- **Root cause**: `convertTsBdFormat` wrote `((ts & 0x3FFFFFFF) | 0x80000000) >>> 0`.
+  The `| 0x80000000` unconditionally sets bits[31:30] of the BD 4-byte header to `10`
+  ("copy once"). Toast reference packets all have bits[31:30] = `00` (no restriction).
+- **Fix**: `(ts & 0x3FFFFFFF) >>> 0` — bits[31:30] are now always 0.
+
+### BUG-3 — POSSIBLE: selectedSoundId/activatedSoundId = 0x00 with no Sound.bdmv
+
+- **Symptom**: Hardware may attempt to load Sound.bdmv for sound ID 0, fail, and
+  invalidate the button or skip rendering it. Toast reference uses 0xFF (no sound) on
+  all buttons; Clannad reference also uses 0xFF.
+- **Root cause**: `buildMenuDisplaySet` set `selectedSoundId: 0, activatedSoundId: 0`.
+  `encodeButton` defaulted missing fields to `|| 0` (falsy coercion) instead of `?? 0xFF`.
+- **Fix**: `buildMenuDisplaySet` now passes `0xFF`; `encodeButton` uses `?? 0xFF` for both
+  sound ID fields. Explicit `0` is still respected when passed intentionally.
+
+107 unit tests pass (was 97, +10 new tests for all three fixes).
+
+---
+
 ## v1.10.10 — 2026-05-20
 
 **Clannad reference disc audit — three PES/ICS encoder bugs fixed**

@@ -213,9 +213,9 @@ function buildMenuDisplaySet({ videoWidth = 1920, videoHeight = 1080, playlists 
       leftBtnId:          i,
       rightBtnId:         i,
       normalStartObjId:   i * 3,      normalEndObjId: i * 3,      normalRepeat: false,
-      selectedSoundId:    0,
+      selectedSoundId:    0xFF,
       selStartObjId:      i * 3 + 1,  selEndObjId: i * 3 + 1,  selRepeat: false,
-      activatedSoundId:   0,
+      activatedSoundId:   0xFF,
       actStartObjId:      i * 3 + 2,  actEndObjId: i * 3 + 2,
       navCmds: [buildNavCmd('PLAY_PL', pl)],
     }],
@@ -310,7 +310,7 @@ function convertTsBdFormat(tsPackets, baseTimestamp = 0) {
     const ts = baseTimestamp + i * 300;  // 300 = 1 tick spacing (27MHz / 90kHz)
     // 4-byte timestamp: top 30 bits are the 27MHz clock value
     // >>> 0 converts signed 32-bit result to unsigned for writeUInt32BE
-    out.writeUInt32BE(((ts & 0x3FFFFFFF) | 0x80000000) >>> 0, i * 192);
+    out.writeUInt32BE((ts & 0x3FFFFFFF) >>> 0, i * 192);
     tsPackets.copy(out, i * 192 + 4, i * 188, (i + 1) * 188);
   }
   return out;
@@ -334,7 +334,9 @@ function injectIGIntoM2ts(videoM2ts, igTs188, insertAfterN = 10) {
   if (videoM2ts.length % 192 !== 0) {
     throw new Error(`Video m2ts not aligned to 192 bytes (${videoM2ts.length} bytes)`);
   }
-  const igBd = convertTsBdFormat(igTs188);
+  const beforeIdx = Math.min(insertAfterN - 1, videoM2ts.length / 192 - 1);
+  const beforeArr = videoM2ts.readUInt32BE(beforeIdx * 192) & 0x3FFFFFFF;
+  const igBd = convertTsBdFormat(igTs188, beforeArr + 300);
   const insertAt = Math.min(insertAfterN * 192, videoM2ts.length);
   return Buffer.concat([
     videoM2ts.slice(0, insertAt),
