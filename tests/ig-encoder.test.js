@@ -344,13 +344,13 @@ console.log('\n=== 5a: ICS stream_model byte (Multiplexed vs Non-Multiplexed) ==
   // libbluray ig_decode.c line 285-294: stream_model=0 reads 10-byte timeout block;
   //                                     stream_model=1 does NOT.
   // For our disc: IG is in the same m2ts clip as video → use streamModel=false (InMux, bit=0).
-  // compositionTimeoutPts must equal the video PTS so hardware doesn't discard the composition
-  // as expired (video starts at PTS≈54,000,000; composition_timeout_pts=0 would be in the past).
+  // composition_timeout_pts=0 is the universal 'no timeout' convention (v1.10.9).
+  // Setting to video PTS (v1.10.8) caused hardware to reject disc at load time.
   const makeICS = (streamModel) => encodeICS({
     videoWidth: 1920, videoHeight: 1080, frameRate: 0x40,
     compositionNumber: 0, compositionState: 2,
     streamModel, uiModel: false, userTimeoutMs: 0,
-    compositionTimeoutPts: 54000000,
+    compositionTimeoutPts: 0,
     pages: [{ id: 0, version: 0, uoMask: Buffer.alloc(8),
       paletteIdRef: 0, defaultSelectedButtonIdRef: 0, defaultActivatedButtonIdRef: 0xFFFF,
       bogs: [{ defaultValidButtonIdRef: 0, buttons: [
@@ -374,13 +374,12 @@ console.log('\n=== 5a: ICS stream_model byte (Multiplexed vs Non-Multiplexed) ==
   // Both must still be epoch_start
   assertEq(icsMux[10],    0x80, 'Multiplexed    ICS composition_state = 0x80 (epoch_start)');
   assertEq(icsNonMux[10], 0x80, 'Non-Multiplexed ICS composition_state = 0x80 (epoch_start)');
-  // Multiplexed: composition_timeout_pts encoded at [16-20] (7 zero bits + 33-bit value)
-  // PTS=54000000=0x0337F980: byte[0]=0x00, byte[1]=0x03, byte[2]=0x37, byte[3]=0xF9, byte[4]=0x80
+  // Multiplexed: composition_timeout_pts=0 → all 5 bytes [16-20] = 0x00
   assertEq(icsMux[16], 0x00, 'Multiplexed ICS[16] composition_timeout_pts byte 0 = 0x00');
-  assertEq(icsMux[17], 0x03, 'Multiplexed ICS[17] composition_timeout_pts byte 1 = 0x03');
-  assertEq(icsMux[18], 0x37, 'Multiplexed ICS[18] composition_timeout_pts byte 2 = 0x37');
-  assertEq(icsMux[19], 0xF9, 'Multiplexed ICS[19] composition_timeout_pts byte 3 = 0xF9');
-  assertEq(icsMux[20], 0x80, 'Multiplexed ICS[20] composition_timeout_pts byte 4 = 0x80');
+  assertEq(icsMux[17], 0x00, 'Multiplexed ICS[17] composition_timeout_pts byte 1 = 0x00');
+  assertEq(icsMux[18], 0x00, 'Multiplexed ICS[18] composition_timeout_pts byte 2 = 0x00');
+  assertEq(icsMux[19], 0x00, 'Multiplexed ICS[19] composition_timeout_pts byte 3 = 0x00');
+  assertEq(icsMux[20], 0x00, 'Multiplexed ICS[20] composition_timeout_pts byte 4 = 0x00');
 }
 
 console.log('\n=== 5b: patchMplsForStill writes still_mode=1 to byte[31] (v1.10.6 fix) ===');

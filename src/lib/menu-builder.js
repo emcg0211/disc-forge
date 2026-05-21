@@ -236,7 +236,7 @@ function buildMenuDisplaySet({ videoWidth = 1920, videoHeight = 1080, playlists 
       compositionNumber: 0,
       compositionState:  2,     // epoch_start
       streamModel:       false, // Multiplexed (stream_model=0): IG is in the same m2ts clip as video
-      compositionTimeoutPts: pts, // display at video PTS so hardware doesn't discard as expired
+      // composition_timeout_pts=0 is the universal 'no timeout' convention; setting to video PTS in v1.10.8 caused hardware to reject the disc at load time, likely because the composition appears 'expired' immediately.
       uiModel:           false,
       userTimeoutMs:     0,
       pages: [{
