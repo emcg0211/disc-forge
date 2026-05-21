@@ -232,7 +232,7 @@ function buildMenuDisplaySet({ videoWidth = 1920, videoHeight = 1080, playlists 
   return buildIGDisplaySet({
     composition: {
       videoWidth, videoHeight,
-      frameRate:        0x40,   // 24fps
+      frameRate:        0x20,   // 24fps (frame_rate_code=2; 0x40 would be 29.97fps)
       compositionNumber: 0,
       compositionState:  2,     // epoch_start
       streamModel:       false, // Multiplexed (stream_model=0): IG is in the same m2ts clip as video

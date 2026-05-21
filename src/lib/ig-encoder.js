@@ -66,19 +66,40 @@ function buildSegment(segType, payload) {
 
 /**
  * Write a 90kHz PTS value as a 5-byte PES PTS field.
- * PTS field: 4 bits marker + 3 bits PTS[32:30] + 1 marker + 15 bits PTS[29:15]
- * + 1 marker + 15 bits PTS[14:0] + 1 marker
  *
- * @param {number} pts - PTS in 90kHz ticks
+ * MPEG-2 PES marker nibble rules (Clannad reference confirmed):
+ *   PTS_DTS_flags='10' (PTS only):  byte[0] base = 0x21  (marker '0010')
+ *   PTS_DTS_flags='11' (PTS+DTS):   byte[0] base = 0x31  (marker '0011')
+ *   DTS field:                      byte[0] base = 0x11  (marker '0001')
+ *
+ * @param {number}  pts    - PTS in 90kHz ticks
+ * @param {boolean} withDts - true when DTS is also present in this PES (use 0x31 base)
  * @returns {Buffer} 5 bytes
  */
-function encodePTS(pts) {
+function encodePTS(pts, withDts = false) {
+  const base = withDts ? 0x31 : 0x21;
   const buf = Buffer.alloc(5);
-  buf[0] = 0x31 | (((pts >> 30) & 0x07) << 1);    // 0011 PTS[32:30] 1
+  buf[0] = base | (((pts >> 30) & 0x07) << 1);
   buf[1] = (pts >> 22) & 0xFF;
   buf[2] = ((pts >> 15) & 0x7F) << 1 | 1;
   buf[3] = (pts >> 7) & 0xFF;
   buf[4] = ((pts & 0x7F) << 1) | 1;
+  return buf;
+}
+
+/**
+ * Write a 90kHz DTS value as a 5-byte PES DTS field.
+ * DTS marker nibble = 0x11 ('0001').
+ * @param {number} dts - DTS in 90kHz ticks
+ * @returns {Buffer} 5 bytes
+ */
+function encodeDTS(dts) {
+  const buf = Buffer.alloc(5);
+  buf[0] = 0x11 | (((dts >> 30) & 0x07) << 1);
+  buf[1] = (dts >> 22) & 0xFF;
+  buf[2] = ((dts >> 15) & 0x7F) << 1 | 1;
+  buf[3] = (dts >> 7) & 0xFF;
+  buf[4] = ((dts & 0x7F) << 1) | 1;
   return buf;
 }
 
@@ -263,7 +284,9 @@ function encodeWDS(windows) {
  * @param {object} opts
  * @param {number} opts.videoWidth
  * @param {number} opts.videoHeight
- * @param {number} opts.frameRate              - 4-bit frame rate code (0x40 = 24fps, 0x50 = 25fps, 0x60 = 29.97fps)
+ * @param {number} opts.frameRate              - byte where high nibble is BD frame_rate_code:
+ *                                               0x10=23.976fps  0x20=24fps  0x30=25fps
+ *                                               0x40=29.97fps   0x60=50fps  0x70=59.94fps
  * @param {number} opts.compositionNumber      - display set counter
  * @param {number} opts.compositionState       - 0=normal, 1=acq_point, 2=epoch_start, 3=epoch_continue
  * @param {boolean} opts.streamModel           - false=InMux/Multiplexed (stream_model bit=0, IG in same clip as video,
@@ -516,30 +539,34 @@ function buildNavCmd(type, arg = 0) {
 /**
  * Wrap a segment buffer in a PES packet and then TS packets.
  *
- * TODO: implement PES/TS packetization for IG stream injection.
- * This requires:
- *   1. PES header with PTS stamping
- *   2. Splitting payload into 184-byte TS payload chunks
- *   3. Assigning correct PID and continuity counter
+ * For ICS segments, pass dts to emit a DTS+PTS header (flags2=0xC0).
+ * BD spec requires DTS in the ICS PES so hardware can schedule pre-buffered
+ * loading of ODS/PDS before the composition display time (confirmed vs Clannad
+ * reference: ICS PES flags2=0xC0, hdr_len=10; PDS/ODS PES flags2=0x80, hdr_len=5).
  *
- * @param {Buffer} segmentData - concatenated segment buffers
- * @param {number} pid         - IG stream PID (typically 0x1200)
- * @param {number} pts         - presentation timestamp (90kHz)
+ * @param {Buffer}      segmentData - concatenated segment buffers
+ * @param {number}      pid         - IG stream PID (default 0x1200)
+ * @param {number}      pts         - presentation timestamp (90kHz)
+ * @param {number}      startCC     - continuity counter starting value
+ * @param {number|null} dts         - decode timestamp (90kHz); null = PTS-only PES
  * @returns {Buffer} TS-packetized PES
  */
-function wrapInPES(segmentData, pid = 0x1200, pts = 0, startCC = 0) {
-  // Build PES packet:
-  //   0x000001 stream_id(1) PES_length(2) flags(2) hdr_data_len(1) PTS(5) data
-  const ptsBuf = encodePTS(pts);
-  const pesLength = 3 + ptsBuf.length + segmentData.length; // flags(2)+hdr_len(1)+pts(5)+data
+function wrapInPES(segmentData, pid = 0x1200, pts = 0, startCC = 0, dts = null) {
+  const hasDts   = dts !== null && dts !== undefined;
+  const ptsBuf   = encodePTS(pts, hasDts);
+  const dtsBuf   = hasDts ? encodeDTS(dts) : Buffer.alloc(0);
+  const hdrDataLen = ptsBuf.length + dtsBuf.length; // 5 (PTS-only) or 10 (PTS+DTS)
+
+  // PES_packet_length = bytes after the 6-byte PES start (stream_id+length = 3+2+1 = 6)
+  const pesLength = 3 + hdrDataLen + segmentData.length; // flags(2)+hdr_len(1)+timestamps+data
   const hdr = Buffer.alloc(9);
   hdr[0] = 0x00; hdr[1] = 0x00; hdr[2] = 0x01;
   hdr[3] = PES_STREAM_ID;
   hdr.writeUInt16BE(Math.min(pesLength, 0xFFFF), 4);
-  hdr[6] = 0x84;  // marker=1 | data_alignment_indicator (bit 2, required for IG PES)
-  hdr[7] = 0x80;  // PTS only (PTS_DTS_flags=10)
-  hdr[8] = 0x05;  // PES_header_data_length = 5 bytes (PTS)
-  const pes = Buffer.concat([hdr, ptsBuf, segmentData]);
+  hdr[6] = 0x84;                         // marker(2)=10 | data_alignment_indicator(bit2)
+  hdr[7] = hasDts ? 0xC0 : 0x80;        // PTS+DTS=0xC0 (ICS), PTS-only=0x80 (others)
+  hdr[8] = hdrDataLen;                   // PES_header_data_length (5 or 10)
+  const pes = Buffer.concat([hdr, ptsBuf, dtsBuf, segmentData]);
 
   // Packetize into 188-byte TS packets
   const packets = [];
@@ -605,11 +632,22 @@ function buildIGDisplaySet({ composition, palette, windows, objects, pid, pts })
   // in a single PES means only the first (ICS) is decoded, END never reached,
   // s->complete stays 0, and GC_CTRL_INIT_MENU is never called.
   // CC must be continuous across all PES packets for the same PID.
+  //
+  // ICS PES requires DTS in addition to PTS (Clannad reference confirmed):
+  // hardware IG controllers use DTS to schedule pre-buffered ODS/PDS loading
+  // before the composition display time. PDS/ODS/END use PTS-only.
+  // DTS delta 11664 ticks (~130ms) matches Clannad's reference disc pattern.
+  const icsDts = Math.max(0, (pts || 0) - 11664);
+
   const segments = [ics, pds, wds, ...ods, end];
   let cc = 0;
-  const pesPackets = segments.map(seg => {
-    const pkt = wrapInPES(seg, pid, pts, cc);
-    cc = (cc + Math.ceil((14 + seg.length) / 184)) & 0x0F;
+  const pesPackets = segments.map((seg, idx) => {
+    const segDts = (idx === 0) ? icsDts : null;  // DTS only for ICS (first segment)
+    // ICS PES has a 10-byte header (PTS+DTS); others have 5-byte header (PTS only).
+    // The PES header overhead is: 9 fixed bytes + 5 or 10 timestamp bytes = 14 or 19 bytes.
+    const pesHdrSize = (idx === 0) ? 19 : 14;
+    const pkt = wrapInPES(seg, pid, pts, cc, segDts);
+    cc = (cc + Math.ceil((pesHdrSize + seg.length) / 184)) & 0x0F;
     return pkt;
   });
   return Buffer.concat(pesPackets);
@@ -630,6 +668,7 @@ module.exports = {
   wrapInPES,
   buildSegment,
   encodePTS,
+  encodeDTS,
   encodeEffectSequence,
   encodePage,
   encodeBOG,

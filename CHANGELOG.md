@@ -1,5 +1,56 @@
 # Changelog
 
+## v1.10.10 — 2026-05-20
+
+**Clannad reference disc audit — three PES/ICS encoder bugs fixed**
+
+Ground truth: unencrypted HDMV InMux reference disc (Clannad Standard Edition)
+byte-compared against our encoder output. Reference: `reference_clannad/ig_extract.bin` (939KB,
+1 ICS + 14 PDS + 205 ODS). Audit findings logged to `/tmp/clannad_audit_findings.md`.
+
+### BUG-2 — CRITICAL: ICS PES missing DTS (flags 0x80 → 0xC0, hdr_len 5 → 10)
+
+- **Symptom**: No IG buttons rendered on hardware. Hardware IG controllers require a DTS in the
+  ICS PES to schedule pre-buffered loading of ODS/PDS before the composition display time.
+  Without DTS the controller likely skips the composition entirely.
+- **Root cause**: `wrapInPES()` always wrote `flags2=0x80` (PTS only) for every segment including
+  ICS. Clannad reference shows ICS PES has `flags2=0xC0` (PTS+DTS, hdr_len=10) while PDS/ODS
+  use `flags2=0x80` (PTS only, hdr_len=5).
+- **Fix**: `wrapInPES(segData, pid, pts, startCC, dts=null)` — pass `dts` for ICS only.
+  `buildIGDisplaySet` computes `icsDts = max(0, pts - 11664)` (matching Clannad's 130ms
+  buffering window). All other segments remain PTS-only.
+
+### BUG-1 — HIGH: Wrong frame_rate_code in ICS VideoDescriptor (0x40 → 0x20)
+
+- **Symptom**: ICS declared 29.97fps for a 24fps clip. Hardware players validating
+  VideoDescriptor against the actual clip attributes may silently reject the ICS.
+- **Root cause**: `buildMenuDisplaySet` passed `frameRate: 0x40`. The high nibble of the
+  VideoDescriptor frame-rate byte is the BD frame_rate_code; 0x40 → code 4 → 29.97fps.
+  For our 24fps video (tsMuxeR `fps=24`) the correct value is code 2 → byte 0x20.
+  The JSDoc comment also had the mapping backwards.
+- **Fix**: `frameRate: 0x40` → `frameRate: 0x20` in `buildMenuDisplaySet`. Updated comment.
+
+### BUG-3 — MEDIUM: Wrong PTS leading nibble for PTS-only PES encoding (0x31 → 0x21)
+
+- **Symptom**: All PES used 0x31 (marker '0011' = PTS+DTS-present), even PTS-only segments.
+  Strict hardware parsers may reject PES with inconsistent PTS_DTS_flags vs marker byte.
+- **Root cause**: `encodePTS()` always used base `0x31`. MPEG-2 spec: PTS-only PES requires
+  '0010' (0x21), PTS-with-DTS requires '0011' (0x31), DTS field requires '0001' (0x11).
+  Clannad confirmed: PDS PES byte[0]=0x21, ICS PES PTS byte[0]=0x31, DTS byte[0]=0x11.
+- **Fix**: `encodePTS(pts, withDts=false)` — default produces 0x21 prefix. New `encodeDTS(dts)`
+  produces 0x11 prefix. Both exported.
+
+Phase A (PCR PID): No action — our `--no-pcr-on-video-pid` tsMuxeR flag already produces
+a dedicated PCR PID (0x1001) matching Clannad. `patchPmtForIG` preserves it.
+
+Phase C/D (PDS/ODS): No bugs found. Encoding matches reference format exactly.
+
+97 unit tests pass (was 81, +16 new tests for all three fixes).
+
+---
+
+## v1.10.9 — 2026-05-20 *(SUPERSEDED — v1.10.10 contains further fixes)*
+
 ## v1.10.8 — 2026-05-20
 
 **Full IG byte audit via libbluray source validation — two critical ICS encoder bugs found and fixed**

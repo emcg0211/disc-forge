@@ -12,7 +12,7 @@ const { execFileSync } = require('child_process');
 
 const {
   SEG, buildNavCmd, encodePDS, encodeODS, encodeWDS, encodeICS, encodeEND,
-  encodeRLE, buildIGDisplaySet, wrapInPES, buildSegment, encodePTS,
+  encodeRLE, buildIGDisplaySet, wrapInPES, buildSegment, encodePTS, encodeDTS,
   encodeEffectSequence, encodePage, encodeBOG, encodeButton,
 } = require(path.join(__dirname, '..', 'src', 'lib', 'ig-encoder.js'));
 
@@ -470,6 +470,140 @@ console.log('\n=== 6: ICS num_pages immediately follows user_timeout_duration (v
 
   // Multiplexed still 10 bytes longer than Non-Multiplexed (timeout block, unchanged by fix)
   assert(icsMux.length === icsNonMux.length + 10, 'Mux ICS 10 bytes longer than NonMux (timeout block)');
+}
+
+// ─── v1.10.10 Clannad audit fixes ────────────────────────────────────────────
+
+console.log('\n=== 7: frame_rate_code in ICS VideoDescriptor (v1.10.10 fix) ===');
+{
+  // BD frame_rate_code is stored in the high nibble of VideoDescriptor byte[4].
+  // For 24fps video the code is 2 → byte value 0x20.
+  // We were sending 0x40 (code 4 = 29.97fps) — wrong for our 24fps clip.
+  // Confirmed against Clannad (23.976fps → code 1 → byte 0x10).
+  const ics24fps = encodeICS({ videoWidth: 1920, videoHeight: 1080, frameRate: 0x20, pages: [{ id: 0, version: 0, uoMask: Buffer.alloc(8), animationFrameRateCode: 0, defaultSelectedButtonIdRef: 0, defaultActivatedButtonIdRef: 0xFFFF, paletteIdRef: 0, bogs: [] }] });
+  const payload24 = ics24fps.slice(3);  // skip 3-byte segment header
+  assertEq(payload24[4] >> 4, 2, 'frameRate 0x20 → frame_rate_code = 2 (24fps)');
+  assertEq(payload24[4] & 0x0F, 0, 'frame_rate_code low nibble reserved = 0');
+
+  const ics24976fps = encodeICS({ videoWidth: 1920, videoHeight: 1080, frameRate: 0x10, pages: [{ id: 0, version: 0, uoMask: Buffer.alloc(8), animationFrameRateCode: 0, defaultSelectedButtonIdRef: 0, defaultActivatedButtonIdRef: 0xFFFF, paletteIdRef: 0, bogs: [] }] });
+  const payload24976 = ics24976fps.slice(3);
+  assertEq(payload24976[4] >> 4, 1, 'frameRate 0x10 → frame_rate_code = 1 (23.976fps, Clannad-style)');
+
+  const ics2997fps = encodeICS({ videoWidth: 1920, videoHeight: 1080, frameRate: 0x40, pages: [{ id: 0, version: 0, uoMask: Buffer.alloc(8), animationFrameRateCode: 0, defaultSelectedButtonIdRef: 0, defaultActivatedButtonIdRef: 0xFFFF, paletteIdRef: 0, bogs: [] }] });
+  const payload2997 = ics2997fps.slice(3);
+  assertEq(payload2997[4] >> 4, 4, 'frameRate 0x40 → frame_rate_code = 4 (29.97fps)');
+}
+
+console.log('\n=== 8: PTS encoding prefix (v1.10.10 fix) ===');
+{
+  // encodePTS(pts, withDts=false) must use 0x21 prefix (PTS-only, marker '0010').
+  // encodePTS(pts, withDts=true) must use 0x31 prefix (PTS+DTS, marker '0011').
+  // encodeDTS(dts) must use 0x11 prefix (marker '0001').
+  // Confirmed against Clannad: PDS PES byte[0]=0x21, ICS PES PTS byte[0]=0x31, DTS byte[0]=0x11.
+  const ptsOnly = encodePTS(0, false);
+  assertEq(ptsOnly[0] & 0xF0, 0x20, 'encodePTS(pts, withDts=false) → leading nibble 0x2');
+
+  const ptsWithDts = encodePTS(0, true);
+  assertEq(ptsWithDts[0] & 0xF0, 0x30, 'encodePTS(pts, withDts=true) → leading nibble 0x3');
+
+  const dts = encodeDTS(0);
+  assertEq(dts[0] & 0xF0, 0x10, 'encodeDTS() → leading nibble 0x1');
+
+  // Verify PTS value is correctly encoded for a non-zero PTS
+  const testPts = 54000000;  // 600s at 90kHz (Clannad's PTS)
+  const ptsBuf  = encodePTS(testPts, true);
+  const decoded = ((ptsBuf[0] & 0x0e) << 29) | (ptsBuf[1] << 22) | ((ptsBuf[2] & 0xfe) << 14) | (ptsBuf[3] << 7) | ((ptsBuf[4] & 0xfe) >> 1);
+  assertEq(decoded, testPts, `encodePTS(${testPts}) round-trips correctly`);
+
+  const dtsBuf  = encodeDTS(53988336);  // Clannad ICS DTS
+  const dtsDecoded = ((dtsBuf[0] & 0x0e) << 29) | (dtsBuf[1] << 22) | ((dtsBuf[2] & 0xfe) << 14) | (dtsBuf[3] << 7) | ((dtsBuf[4] & 0xfe) >> 1);
+  assertEq(dtsDecoded, 53988336, 'encodeDTS(53988336) round-trips correctly');
+}
+
+console.log('\n=== 9: ICS PES DTS required (v1.10.10 fix) ===');
+{
+  // buildIGDisplaySet must produce an ICS PES with PTS+DTS (flags2=0xC0, hdr_len=10).
+  // PDS/ODS/END PES must have PTS-only (flags2=0x80, hdr_len=5).
+  // Confirmed against Clannad reference disc (PES header byte analysis).
+  const seg1px = buildIGDisplaySet({
+    composition: { videoWidth: 1920, videoHeight: 1080, frameRate: 0x20, compositionNumber: 0, compositionState: 2, streamModel: false, uiModel: false, compositionTimeoutPts: 0, selectionTimeoutPts: 0, userTimeoutMs: 0, pages: [{ id: 0, version: 0, uoMask: Buffer.alloc(8), animationFrameRateCode: 0, defaultSelectedButtonIdRef: 0, defaultActivatedButtonIdRef: 0xFFFF, paletteIdRef: 0, bogs: [] }] },
+    palette: { paletteId: 0, version: 0, entries: [{ id: 0, Y: 16, Cr: 128, Cb: 128, T: 255 }] },
+    windows: [{ id: 0, x: 0, y: 0, width: 100, height: 100 }],
+    objects: [{ objectId: 0, version: 0, width: 1, height: 1, pixels: new Uint8Array([0]) }],
+    pid: 0x1400, pts: 54000000,
+  });
+
+  // Walk 188-byte TS packets to extract the first two PES headers
+  const pesPtsDtsList = [];
+  let off = 0;
+  while (off + 188 <= seg1px.length) {
+    const pkt = seg1px.slice(off, off + 188);
+    if (pkt[0] !== 0x47) { off += 188; continue; }
+    if (!(pkt[1] & 0x40)) { off += 188; continue; }   // not PUSI
+    const hasAdapt = (pkt[3] & 0x20) !== 0;
+    const ps = hasAdapt ? (4 + 1 + pkt[4]) : 4;
+    const pes = pkt.slice(ps);
+    if (pes[0] === 0 && pes[1] === 0 && pes[2] === 1) {
+      pesPtsDtsList.push({ flags2: pes[7], hdrLen: pes[8] });
+    }
+    off += 188;
+  }
+
+  // First PES is ICS → must have flags2=0xC0 (PTS+DTS), hdr_len=10
+  assert(pesPtsDtsList.length >= 2, 'buildIGDisplaySet produces at least 2 PUSI PES packets');
+  if (pesPtsDtsList.length >= 1) {
+    assertEq(pesPtsDtsList[0].flags2, 0xC0, 'ICS PES flags2 = 0xC0 (PTS+DTS)');
+    assertEq(pesPtsDtsList[0].hdrLen, 10,   'ICS PES hdr_len = 10 (5 PTS + 5 DTS bytes)');
+  }
+  // Second PES is PDS → must have flags2=0x80 (PTS only), hdr_len=5
+  if (pesPtsDtsList.length >= 2) {
+    assertEq(pesPtsDtsList[1].flags2, 0x80, 'PDS PES flags2 = 0x80 (PTS only)');
+    assertEq(pesPtsDtsList[1].hdrLen, 5,    'PDS PES hdr_len = 5 (PTS only)');
+  }
+
+  // ICS DTS should be pts - 11664 (clamped to 0)
+  // Verify by decoding the DTS field from the ICS PES
+  let off2 = 0;
+  while (off2 + 188 <= seg1px.length) {
+    const pkt = seg1px.slice(off2, off2 + 188);
+    if (pkt[0] !== 0x47) { off2 += 188; continue; }
+    if (!(pkt[1] & 0x40)) { off2 += 188; continue; }
+    const hasAdapt = (pkt[3] & 0x20) !== 0;
+    const ps = hasAdapt ? (4 + 1 + pkt[4]) : 4;
+    const pes = pkt.slice(ps);
+    if (pes[0] !== 0 || pes[1] !== 0 || pes[2] !== 1) { off2 += 188; continue; }
+    if (pes[7] !== 0xC0) { off2 += 188; continue; }  // want PTS+DTS PES
+    const d = pes.slice(14, 19);
+    const dtsDecoded = ((d[0] & 0x0e) << 29) | (d[1] << 22) | ((d[2] & 0xfe) << 14) | (d[3] << 7) | ((d[4] & 0xfe) >> 1);
+    assertEq(dtsDecoded, 54000000 - 11664, 'ICS DTS = PTS - 11664 (130ms buffering window)');
+    break;
+    off2 += 188;
+  }
+
+  // Zero-PTS case: DTS must clamp to 0 (can't go negative)
+  const seg0pts = buildIGDisplaySet({
+    composition: { videoWidth: 1920, videoHeight: 1080, frameRate: 0x20, compositionNumber: 0, compositionState: 2, streamModel: false, uiModel: false, compositionTimeoutPts: 0, selectionTimeoutPts: 0, userTimeoutMs: 0, pages: [{ id: 0, version: 0, uoMask: Buffer.alloc(8), animationFrameRateCode: 0, defaultSelectedButtonIdRef: 0, defaultActivatedButtonIdRef: 0xFFFF, paletteIdRef: 0, bogs: [] }] },
+    palette: { paletteId: 0, version: 0, entries: [{ id: 0, Y: 16, Cr: 128, Cb: 128, T: 255 }] },
+    windows: [],
+    objects: [],
+    pid: 0x1400, pts: 0,
+  });
+  let off3 = 0;
+  while (off3 + 188 <= seg0pts.length) {
+    const pkt = seg0pts.slice(off3, off3 + 188);
+    if (pkt[0] !== 0x47) { off3 += 188; continue; }
+    if (!(pkt[1] & 0x40)) { off3 += 188; continue; }
+    const hasAdapt = (pkt[3] & 0x20) !== 0;
+    const ps = hasAdapt ? (4 + 1 + pkt[4]) : 4;
+    const pes = pkt.slice(ps);
+    if (pes[0] !== 0 || pes[1] !== 0 || pes[2] !== 1) { off3 += 188; continue; }
+    if (pes[7] !== 0xC0) { off3 += 188; continue; }
+    const d = pes.slice(14, 19);
+    const dtsDecoded = ((d[0] & 0x0e) << 29) | (d[1] << 22) | ((d[2] & 0xfe) << 14) | (d[3] << 7) | ((d[4] & 0xfe) >> 1);
+    assertEq(dtsDecoded, 0, 'ICS DTS clamped to 0 when PTS < 11664');
+    break;
+    off3 += 188;
+  }
 }
 
 // ─── Summary ──────────────────────────────────────────────────────────────────
