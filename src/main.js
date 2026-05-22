@@ -3590,10 +3590,13 @@ async function addMenuToDisc(bdFolder, numEpisodes, workDir, igMenuConfig = {}) 
   const ffArgs = (dur) => [
     '-y', '-f', 'lavfi',
     '-i', `color=c=0x1a1a2e:size=1920x1080:rate=24`,
+    '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000',
+    '-map', '0:v', '-map', '1:a',
     '-t', String(dur),
     '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
     '-preset', 'medium', '-crf', '28',
     '-bf', '2', '-g', '24',
+    '-c:a', 'ac3', '-b:a', '192k',
   ];
 
   sendLog('[Menu] Generating preload clip (1s) and menu clip (5s)');
@@ -3616,7 +3619,8 @@ async function addMenuToDisc(bdFolder, numEpisodes, workDir, igMenuConfig = {}) 
     // track=1 required for MKV container; fps=24 matches encoding
     fs.writeFileSync(meta,
       `MUXOPT --no-pcr-on-video-pid --new-audio-pes --blu-ray\n` +
-      `V_MPEG4/ISO/AVC, "${tsPath(mkv)}", track=1, level=4.1, insertSEI, contSPS, lang=und, fps=24\n`
+      `V_MPEG4/ISO/AVC, "${tsPath(mkv)}", track=1, level=4.1, insertSEI, contSPS, lang=und, fps=24\n` +
+      `A_AC3, "${tsPath(mkv)}", track=2, lang=und\n`
     );
     sendLog(`[Menu] Running tsMuxeR for ${label} clip`);
     await new Promise((resolve, reject) => {

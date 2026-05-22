@@ -36,7 +36,8 @@ function runTsMuxer(mkvPath, outBdmv) {
   // track=1 required for MKV container; fps=24 matches encoding
   fs.writeFileSync(metaPath,
     `MUXOPT --no-pcr-on-video-pid --new-audio-pes --blu-ray\n` +
-    `V_MPEG4/ISO/AVC, "${mkvPath}", track=1, level=4.1, insertSEI, contSPS, lang=und, fps=24\n`
+    `V_MPEG4/ISO/AVC, "${mkvPath}", track=1, level=4.1, insertSEI, contSPS, lang=und, fps=24\n` +
+    `A_AC3, "${mkvPath}", track=2, lang=und\n`
   );
   const r = spawnSync(tsmuxerPath, [metaPath, outBdmv], { stdio: ['ignore', 'pipe', 'pipe'] });
   if (r.status !== 0) throw new Error(`tsMuxeR failed: ${r.stderr.toString().slice(-300)}`);
@@ -62,9 +63,12 @@ async function addMenu() {
   const ffPre = spawnSync(ffmpegPath, [
     '-y', '-f', 'lavfi',
     '-i', 'color=c=0x1a1a2e:size=1920x1080:rate=24',
+    '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000',
+    '-map', '0:v', '-map', '1:a',
     '-t', '1',
     '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
     '-preset', 'medium', '-crf', '28', '-bf', '2', '-g', '24',
+    '-c:a', 'ac3', '-b:a', '192k',
     preMkv,
   ], { stdio: ['ignore', 'ignore', 'pipe'] });
   if (ffPre.status !== 0) throw new Error(`ffmpeg preload bg failed: ${ffPre.stderr.toString().slice(-300)}`);
@@ -75,9 +79,12 @@ async function addMenu() {
   const ffMenu = spawnSync(ffmpegPath, [
     '-y', '-f', 'lavfi',
     '-i', 'color=c=0x1a1a2e:size=1920x1080:rate=24',
+    '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000',
+    '-map', '0:v', '-map', '1:a',
     '-t', '5',
     '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
     '-preset', 'medium', '-crf', '28', '-bf', '2', '-g', '24',
+    '-c:a', 'ac3', '-b:a', '192k',
     menuMkv,
   ], { stdio: ['ignore', 'ignore', 'pipe'] });
   if (ffMenu.status !== 0) throw new Error(`ffmpeg menu bg failed: ${ffMenu.stderr.toString().slice(-300)}`);

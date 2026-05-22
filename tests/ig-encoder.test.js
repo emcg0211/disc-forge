@@ -664,6 +664,194 @@ console.log('\n=== 11: sound IDs default to 0xFF (v1.10.11) ===');
   assertEq(btnExplicit[actSoundOff], 0x00, 'activatedSoundId=0 explicit value preserved');
 }
 
+console.log('\n=== 12: patchMplsForIG correctly handles num_aud=1 (v1.10.13) ===');
+{
+  // When tsMuxeR muxes audio, the MPLS STN_table has num_aud=1 and an audio stream
+  // entry already present. patchMplsForIG must place the IG entry AFTER the audio
+  // entry (not before it), and update num_IG=1 and STN_table.length+=16.
+  const { patchMplsForIG } = require(path.join(__dirname, '..', 'src', 'lib', 'menu-builder.js'));
+
+  // Build a minimal MPLS with one PlayItem whose STN_table has num_vid=1, num_aud=1,
+  // num_PG=0, num_IG=0.
+  const PL_START = 40;          // PlayList section offset
+  const PL_MARK  = PL_START + 4 + 2 + 2 + 2 + 2 + 80; // right after PlayList
+
+  const buf = Buffer.alloc(PL_MARK + 8, 0);
+  // MPLS header pointers
+  buf.writeUInt32BE(PL_START,  8);   // PlayList_start_address
+  buf.writeUInt32BE(PL_MARK,  12);   // PlayListMark_start_address
+  buf.writeUInt32BE(0,         16);   // ExtensionData_start_address (none)
+
+  // PlayList section at PL_START
+  buf.writeUInt32BE(88, PL_START);        // PlayList.length = 2+2+2 + 2+80 = 88
+  buf.writeUInt16BE(1,  PL_START + 6);    // numPlayItems = 1
+
+  // PlayItem[0] at PL_START + 10
+  const PI_OFF = PL_START + 10;
+  buf.writeUInt16BE(80, PI_OFF);           // PlayItem.length = 80
+
+  // clip_information_file_name at PI_OFF+2: "00099" (5 bytes)
+  Buffer.from('00099', 'ascii').copy(buf, PI_OFF + 2);
+
+  // STN_table at PI_OFF + 34
+  const STN_OFF = PI_OFF + 34;
+  buf.writeUInt16BE(46, STN_OFF);          // STN_table.length = 14 + 16 + 16 = 46
+  buf[STN_OFF + 4] = 1;  // num_vid = 1
+  buf[STN_OFF + 5] = 1;  // num_aud = 1
+  buf[STN_OFF + 6] = 0;  // num_PG  = 0
+  buf[STN_OFF + 7] = 0;  // num_IG  = 0
+
+  // Video stream entry (16 bytes) at STN_OFF + 16
+  const VID_OFF = STN_OFF + 16;
+  buf[VID_OFF + 0] = 0x09; buf[VID_OFF + 1] = 0x01;
+  buf.writeUInt16BE(0x1011, VID_OFF + 2);  // video PID
+  buf[VID_OFF + 10] = 0x05; buf[VID_OFF + 11] = 0x1B; // coding H.264
+
+  // Audio stream entry (16 bytes) at STN_OFF + 32
+  const AUD_OFF = STN_OFF + 32;
+  buf[AUD_OFF + 0] = 0x09; buf[AUD_OFF + 1] = 0x01;
+  buf.writeUInt16BE(0x1100, AUD_OFF + 2);  // audio PID
+  buf[AUD_OFF + 10] = 0x05; buf[AUD_OFF + 11] = 0x81; // coding AC3
+
+  const patched = patchMplsForIG(buf);
+
+  // num_IG must be 1 now
+  assertEq(patched[STN_OFF + 7], 1, 'patchMplsForIG: num_IG=1 after patch with num_aud=1');
+
+  // STN_table.length must be origStnLen + 16 = 46 + 16 = 62
+  assertEq(patched.readUInt16BE(STN_OFF), 62, 'patchMplsForIG: STN_table.length += 16');
+
+  // PlayItem.length must be origPiLen + 16 = 80 + 16 = 96
+  assertEq(patched.readUInt16BE(PI_OFF), 96, 'patchMplsForIG: PlayItem.length += 16');
+
+  // PlayList.length must be origPlLen + 16 = 88 + 16 = 104
+  assertEq(patched.readUInt32BE(PL_START), 104, 'patchMplsForIG: PlayList.length += 16');
+
+  // PlayListMark_start_address must advance by 16
+  assertEq(patched.readUInt32BE(12), PL_MARK + 16, 'patchMplsForIG: PlayListMark_start_address += 16');
+
+  // IG entry must be inserted AFTER audio entry (at original STN_OFF+48)
+  const IG_ENTRY_OFF = STN_OFF + 48; // 16 header + 16 vid + 16 aud
+  assertEq(patched[IG_ENTRY_OFF + 2], 0x14, 'patchMplsForIG: IG PID high byte = 0x14');
+  assertEq(patched[IG_ENTRY_OFF + 3], 0x00, 'patchMplsForIG: IG PID low byte = 0x00');
+  assertEq(patched[IG_ENTRY_OFF + 11], 0x91, 'patchMplsForIG: IG coding_type = 0x91');
+
+  // Audio entry must be unchanged after patch
+  assertEq(patched.readUInt16BE(AUD_OFF + 2), 0x1100, 'patchMplsForIG: audio PID 0x1100 preserved');
+  assertEq(patched[AUD_OFF + 11], 0x81, 'patchMplsForIG: audio coding_type 0x81 preserved');
+}
+
+console.log('\n=== 13: patchPmtForIG with audio ES already in PMT (v1.10.13) ===');
+{
+  // When tsMuxeR muxes audio, the PMT ES loop already has a video entry and an audio
+  // entry. patchPmtForIG must append IG after audio without corrupting audio.
+  const { patchPmtForIG } = require(path.join(__dirname, '..', 'src', 'lib', 'menu-builder.js'));
+
+  // Build a minimal 192-byte BD m2ts with a PAT packet and a PMT packet.
+  // PAT: PID 0x0000, declares program 1 with PMT PID 0x0100
+  // PMT: PID 0x0100, ES loop has video 0x1011 (0x1B) + audio 0x1100 (0x81)
+  const m2ts = Buffer.alloc(2 * 192, 0xFF);
+
+  // — PAT packet at offset 0 (BD arrival timestamp = 4 bytes) —
+  m2ts.writeUInt32BE(0, 0);       // arrival timestamp
+  const patPkt = m2ts.slice(4, 192);
+  patPkt.fill(0xFF);
+  patPkt[0] = 0x47;               // sync byte
+  patPkt[1] = 0x40;               // PID=0x0000, PUSI=1
+  patPkt[2] = 0x00;
+  patPkt[3] = 0x10;               // payload only, cc=0
+  patPkt[4] = 0x00;               // pointer_field = 0
+  // PAT section at patPkt[5]:
+  patPkt[5]  = 0x00;              // table_id = 0x00
+  patPkt[6]  = 0xB0;              // section_syntax_indicator=1, reserved, section_length high nibble=0
+  patPkt[7]  = 0x0D;              // section_length = 13 (5 fixed + 4 program entry + 4 CRC)
+  patPkt[8]  = 0x00; patPkt[9]  = 0x01; // transport_stream_id
+  patPkt[10] = 0xC1;              // version + current_next
+  patPkt[11] = 0x00;              // section_number
+  patPkt[12] = 0x00;              // last_section_number
+  // program entry: program_number=1, PMT_PID=0x0100
+  patPkt[13] = 0x00; patPkt[14] = 0x01; // program_number = 1
+  patPkt[15] = 0xE1; patPkt[16] = 0x00; // PMT_PID = 0x0100 (reserved 3 bits + 13-bit PID)
+  // CRC (we write zeros; patchPmtForIG reads the PMT CRC, not the PAT CRC)
+  patPkt[17] = 0; patPkt[18] = 0; patPkt[19] = 0; patPkt[20] = 0;
+
+  // — PMT packet at offset 192 —
+  m2ts.writeUInt32BE(300, 192);   // arrival timestamp
+  const pmtPkt = m2ts.slice(196, 384);
+  pmtPkt.fill(0xFF);
+  pmtPkt[0] = 0x47;
+  pmtPkt[1] = 0xC1;               // PID=0x0100, PUSI=1 (0x40 | 0x80=reserved | high PID)
+  // Actually PID 0x0100: (pkt[1] & 0x1F)<<8 | pkt[2]:
+  // pkt[1] = 0x40 | (0x0100 >> 8) = 0x40 | 0x01 = 0x41
+  pmtPkt[1] = 0x41;
+  pmtPkt[2] = 0x00;
+  pmtPkt[3] = 0x10;               // payload only, cc=0
+  pmtPkt[4] = 0x00;               // pointer_field
+  // PMT section at pmtPkt[5]:
+  // ES loop: video(5 bytes) + audio(5 bytes) = 10 bytes
+  // section_length = 9 (fixed PMT fields) + 10 (ES loop) + 4 (CRC) = 23 (but 9 is: PCR_PID(2)+reserved+program_info_length(2)+fixed header = 4 bytes... let me count properly)
+  // PMT section: table_id(1)+section_length(2)+program_number(2)+version+cc(1)+section#(1)+last_section#(1)+PCR_PID(2)+program_info_length(2) = 12 bytes fixed header
+  // ES loop: stream_type(1)+elementary_PID(2)+ES_info_length(2) = 5 bytes per stream
+  // CRC: 4 bytes
+  // section_length = total from byte 3 of section to end = 12-3 + ES_loop + CRC
+  //                = 9 (bytes 3..11) + 10 (ES loop: 2 streams) + 4 (CRC) = 23
+  //
+  // patchPmtForIG uses:
+  //   sectionStart = payloadStart + 1 + pointer
+  //   table_id at sectionStart
+  //   sectionLength = ((pkt[sectionStart+1]&0x0F)<<8)|pkt[sectionStart+2]  ← 12-bit
+  //   progInfoLen = ((pkt[sectionStart+10]&0x0F)<<8)|pkt[sectionStart+11]
+  //   esLoopStart = sectionStart + 12 + progInfoLen
+  //   crcOff = sectionStart + 3 + sectionLength - 4
+
+  const SEC = 5; // sectionStart = pmtPkt[5] (pointer=0, payloadStart=4 in 188-byte pkt, +1 for pointer)
+  pmtPkt[SEC + 0] = 0x02;           // table_id = PMT
+  pmtPkt[SEC + 1] = 0xB0;           // section_syntax_indicator=1, section_length high = 0
+  pmtPkt[SEC + 2] = 23;             // section_length = 23
+  pmtPkt[SEC + 3] = 0x00; pmtPkt[SEC + 4] = 0x01; // program_number
+  pmtPkt[SEC + 5] = 0xC1;           // version=0, current_next=1
+  pmtPkt[SEC + 6] = 0x00;           // section_number
+  pmtPkt[SEC + 7] = 0x00;           // last_section_number
+  pmtPkt[SEC + 8] = 0xE1; pmtPkt[SEC + 9] = 0x11;   // PCR_PID = 0x0111
+  pmtPkt[SEC + 10] = 0xF0; pmtPkt[SEC + 11] = 0x00; // program_info_length = 0
+  // ES loop starts at SEC+12 (esLoopStart)
+  // Video entry: stream_type=0x1B, PID=0x1011, ES_info_length=0
+  pmtPkt[SEC + 12] = 0x1B;
+  pmtPkt[SEC + 13] = 0xE1; pmtPkt[SEC + 14] = 0x11; // PID = 0x1011
+  pmtPkt[SEC + 15] = 0xF0; pmtPkt[SEC + 16] = 0x00; // ES_info_length = 0
+  // Audio entry: stream_type=0x81, PID=0x1100, ES_info_length=0
+  pmtPkt[SEC + 17] = 0x81;
+  pmtPkt[SEC + 18] = 0xF1; pmtPkt[SEC + 19] = 0x00; // PID = 0x1100
+  pmtPkt[SEC + 20] = 0xF0; pmtPkt[SEC + 21] = 0x00; // ES_info_length = 0
+  // CRC at SEC+22..25 (zeros for test; patchPmtForIG recomputes it)
+  pmtPkt[SEC + 22] = 0; pmtPkt[SEC + 23] = 0; pmtPkt[SEC + 24] = 0; pmtPkt[SEC + 25] = 0;
+
+  const patched = patchPmtForIG(m2ts);
+
+  // After patch: section_length should be 23+5=28
+  const patchedPmtPkt = patched.slice(196, 384);
+  const newSectionLength = ((patchedPmtPkt[SEC + 1] & 0x0F) << 8) | patchedPmtPkt[SEC + 2];
+  assertEq(newSectionLength, 28, 'patchPmtForIG: section_length += 5 (video+audio PMT)');
+
+  // IG entry must be appended at SEC+27 (right after the CRC was, before new CRC)
+  // esLoopStart = SEC+12; old crcOff = SEC+22; new IG entry at SEC+22 (before new CRC at SEC+27)
+  const igEntryOff = SEC + 22;
+  assertEq(patchedPmtPkt[igEntryOff],     0x91, 'patchPmtForIG: IG stream_type=0x91 present');
+  // PID field: reserved(3 bits, all 1) + PID(13 bits) = (0xE0 | (0x1400 >> 8)) = 0xF4
+  const igPidDecoded = ((patchedPmtPkt[igEntryOff + 1] & 0x1F) << 8) | patchedPmtPkt[igEntryOff + 2];
+  assertEq(igPidDecoded, 0x1400, 'patchPmtForIG: IG PID decoded = 0x1400');
+
+  // Audio entry must be unchanged
+  assertEq(patchedPmtPkt[SEC + 17], 0x81, 'patchPmtForIG: audio stream_type=0x81 preserved');
+  // audio PID 0x1100: high bits of (pkt[SEC+18] & 0x1F)<<8 | pkt[SEC+19] = 0x1100
+  assertEq(((patchedPmtPkt[SEC + 18] & 0x1F) << 8) | patchedPmtPkt[SEC + 19], 0x1100,
+    'patchPmtForIG: audio PID 0x1100 preserved');
+
+  // Idempotent: calling again must return same buffer (IG already declared)
+  const patched2 = patchPmtForIG(patched);
+  assertEq(Buffer.compare(patched, patched2), 0, 'patchPmtForIG: idempotent with audio+IG in PMT');
+}
+
 // ─── Summary ──────────────────────────────────────────────────────────────────
 
 console.log(`\n${'─'.repeat(50)}`);
