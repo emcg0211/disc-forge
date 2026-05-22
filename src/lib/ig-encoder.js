@@ -633,29 +633,55 @@ function buildIGDisplaySet({ composition, palette, windows, objects, pid, pts })
   // s->complete stays 0, and GC_CTRL_INIT_MENU is never called.
   // CC must be continuous across all PES packets for the same PID.
   //
-  // ics_dts = decode deadline = ics_pts − 11664 ticks (≈130ms).
-  // Used as PTS for all supporting segments (PDS/WDS/ODS) so hardware IG controllers
-  // have palette+objects decoded before the ICS composition phase at ics_dts.
-  // ICS itself: PTS=ics_pts, DTS=ics_dts. END: PTS=ics_pts (after all data).
-  // Clannad reference confirmed: PDS PTS = ICS DTS = 53988336. (v1.10.14 fix)
+  // ics_dts = decode deadline = ics_pts − 11664 ticks (≈130ms, 4 frames at 29.97fps).
   const icsDts = Math.max(0, (pts || 0) - 11664);
 
-  // ICS: PTS=ics_pts DTS=ics_dts (hardware schedules composition at ICS DTS)
-  // PDS/WDS/ODS: PTS=ics_dts so palette+objects are decoded BEFORE ICS composition time.
-  //   Hardware IG controllers are PTS-gated: supporting data must be released (PTS ≤ ICS DTS)
-  //   before the ICS composition phase starts. Clannad verified: PDS PTS = ICS DTS.
-  // END: PTS=ics_pts (comes after all supporting data; Clannad's END > ICS PTS due to large
-  //   ODS pipeline — for our small ODS the composition deadline works fine as upper bound).
+  // ODS decode pipeline (v1.10.15 fix, confirmed from Toast hardware reference):
+  //   Toast (confirmed on LG BP350): each ODS has DTS+PTS (flags2=0xC0).
+  //   ODS[0].DTS = ICS.DTS; ODS[i].DTS = ODS[i-1].PTS (chained).
+  //   ODS[i].PTS = ODS[i].DTS + ceil(w*h/90) — the BD T-STD object decode time at 90kHz.
+  //   The formula ceil(w*h/90) was empirically verified against Toast's raw bytes:
+  //     22×22=484 → ceil(484/90)=6 ✓; 16×16=256 → 3 ✓; 16×17=272 → 4 ✓; 79×46=3634 → 41 ✓
+  //   END.PTS = last ODS PTS (not ICS PTS). Toast: END.PTS−last_ODS.PTS=0, confirmed.
+  //   ICS: PTS=ics_pts, DTS=ics_dts.  PDS/WDS: PTS=ics_dts, no DTS.
+  let decodeClock = icsDts;
+  const odsTimings = ods.map(seg => {
+    const w = seg.readUInt16BE(10);
+    const h = seg.readUInt16BE(12);
+    const decodeTime = Math.max(1, Math.ceil(w * h / 90));
+    const odsDts = decodeClock;
+    const odsPts = decodeClock + decodeTime;
+    decodeClock = odsPts;
+    return { pts: odsPts, dts: odsDts };
+  });
+  const endPts = decodeClock;  // last ODS PTS, or icsDts if there are no ODS
+
+  // Build segments in order: ICS(0), PDS(1), WDS(2), ODS[0..n](3..n+2), END(n+3)
   const segments = [ics, pds, wds, ...ods, end];
+  const odsStartIdx = 3;  // first ODS index in segments array
   const lastIdx = segments.length - 1;
   let cc = 0;
   const pesPackets = segments.map((seg, idx) => {
-    const isICS = idx === 0;
-    const isEND = idx === lastIdx;
-    // ICS and END keep ics_pts; supporting segments (PDS/WDS/ODS) use ics_dts
-    const segPts = (isICS || isEND) ? pts : icsDts;
-    const segDts = isICS ? icsDts : null;  // DTS only for ICS
-    const pesHdrSize = isICS ? 19 : 14;
+    let segPts, segDts;
+    if (idx === 0) {
+      // ICS: PTS=composition time, DTS=decode-start time
+      segPts = pts;
+      segDts = icsDts;
+    } else if (idx === lastIdx) {
+      // END: PTS=last ODS PTS so the display-set-complete signal fires after all objects are decoded
+      segPts = endPts;
+      segDts = null;
+    } else if (idx >= odsStartIdx && idx < lastIdx) {
+      // ODS: chained DTS/PTS pipeline
+      const timing = odsTimings[idx - odsStartIdx];
+      segPts = timing.pts;
+      segDts = timing.dts;
+    } else {
+      // PDS, WDS: decoded at ICS decode-start time, no DTS
+      segPts = icsDts;
+      segDts = null;
+    }
+    const pesHdrSize = (segDts !== null && segDts !== undefined) ? 19 : 14;
     const pkt = wrapInPES(seg, pid, segPts, cc, segDts);
     cc = (cc + Math.ceil((pesHdrSize + seg.length) / 184)) & 0x0F;
     return pkt;

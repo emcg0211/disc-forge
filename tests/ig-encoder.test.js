@@ -852,16 +852,27 @@ console.log('\n=== 13: patchPmtForIG with audio ES already in PMT (v1.10.13) ===
   assertEq(Buffer.compare(patched, patched2), 0, 'patchPmtForIG: idempotent with audio+IG in PMT');
 }
 
-console.log('\n=== 14: PDS/WDS/ODS PES PTS = ics_dts, not ics_pts (v1.10.14 hardware timing fix) ===');
+console.log('\n=== 14: ODS DTS decode pipeline + END timing (v1.10.15 hardware timing fix) ===');
 {
-  // Root cause of hardware-only IG failure (LG BP350, Xbox):
-  //   PDS/WDS/ODS had PTS=ics_pts → hardware IG controller (PTS-gated) couldn't decode
-  //   supporting data before ICS composition phase at ics_dts.
-  // Fix: PDS/WDS/ODS PTS must equal ics_dts so they're available at decode deadline.
-  // ICS: PTS=ics_pts, DTS=ics_dts.  END: PTS=ics_pts.
-  // Clannad reference: PDS PTS = 53988336 = ICS DTS = ICS PTS - 11664.
+  // v1.10.14 fix: PDS/WDS PTS = ICS DTS (correct, kept).
+  // v1.10.15 fix: ODS segments must have DTS+PTS (flags2=0xC0), chained pipeline.
+  //   Confirmed from Toast disc (proven on LG BP350 hardware):
+  //     ODS[0].DTS = ICS.DTS; ODS[i].DTS = ODS[i-1].PTS; ODS[i].PTS = DTS + ceil(w*h/90)
+  //     END.PTS = last ODS PTS (not ICS PTS as in v1.10.14)
+  //   Previous assertion "END.PTS = ics_pts" was WRONG — now replaced.
   const ICS_PTS = 54000000;
   const ICS_DTS = ICS_PTS - 11664;  // 53988336
+
+  // ODS 0: 10×9 = 90 pixels → decode_time = ceil(90/90) = 1
+  // ODS 1: 10×9 = 90 pixels → decode_time = 1
+  // Chain: ODS[0] DTS=ICS_DTS, PTS=ICS_DTS+1; ODS[1] DTS=ICS_DTS+1, PTS=ICS_DTS+2
+  // END.PTS = ICS_DTS+2
+  const ODS_W = 10, ODS_H = 9;  // 90 pixels → decode_time=1 each
+  const ODS0_DTS = ICS_DTS;
+  const ODS0_PTS = ICS_DTS + 1;
+  const ODS1_DTS = ODS0_PTS;
+  const ODS1_PTS = ODS0_PTS + 1;
+  const END_PTS  = ODS1_PTS;
 
   const ds = buildIGDisplaySet({
     composition: {
@@ -877,8 +888,8 @@ console.log('\n=== 14: PDS/WDS/ODS PES PTS = ics_dts, not ics_pts (v1.10.14 hard
     palette: { paletteId: 0, version: 0, entries: [{ id: 0, Y: 16, Cr: 128, Cb: 128, T: 255 }] },
     windows: [{ id: 0, x: 0, y: 0, width: 100, height: 100 }],
     objects: [
-      { objectId: 0, version: 0, width: 1, height: 1, pixels: new Uint8Array([0]) },
-      { objectId: 1, version: 0, width: 1, height: 1, pixels: new Uint8Array([0]) },
+      { objectId: 0, version: 0, width: ODS_W, height: ODS_H, pixels: new Uint8Array(ODS_W * ODS_H).fill(0) },
+      { objectId: 1, version: 0, width: ODS_W, height: ODS_H, pixels: new Uint8Array(ODS_W * ODS_H).fill(0) },
     ],
     pid: 0x1400, pts: ICS_PTS,
   });
@@ -888,7 +899,7 @@ console.log('\n=== 14: PDS/WDS/ODS PES PTS = ics_dts, not ics_pts (v1.10.14 hard
     return ((b[0] & 0x0E) << 29) | (b[1] << 22) | ((b[2] & 0xFE) << 14) | (b[3] << 7) | ((b[4] & 0xFE) >> 1);
   }
 
-  // Walk TS packets and collect PTS for each PUSI PES in order.
+  // Walk TS packets and collect PTS/DTS for each PUSI PES in order.
   // Segment order: ICS(0x18) PDS(0x14) WDS(0x17) ODS(0x15) ODS(0x15) END(0x80)
   const pesiList = [];  // {segType, pts, dts, flags2}
   let off = 0;
@@ -905,40 +916,111 @@ console.log('\n=== 14: PDS/WDS/ODS PES PTS = ics_dts, not ics_pts (v1.10.14 hard
     const hasDts = (flags2 & 0x40) !== 0;
     const ptsVal = hasPts ? decodePts(pes.slice(9, 14)) : null;
     const dtsVal = hasDts ? decodePts(pes.slice(14, 19)) : null;
-    // payload starts at pes[9 + pes[8]]; segment type is first byte of payload
     const payloadOff = 9 + pes[8];
     const segType = payloadOff < pes.length ? pes[payloadOff] : null;
     pesiList.push({ segType, pts: ptsVal, dts: dtsVal, flags2 });
     off += 188;
   }
 
-  // Expect at least ICS + PDS + WDS + ODS + ODS + END = 6 PES packets
+  // Expect ICS + PDS + WDS + ODS + ODS + END = 6 PES packets
   assert(pesiList.length >= 6, `buildIGDisplaySet produces >= 6 PES packets (got ${pesiList.length})`);
 
-  // Segment 0: ICS — PTS=ics_pts, DTS=ics_dts
+  // ICS: PTS=ics_pts, DTS=ics_dts (unchanged from v1.10.14)
   assertEq(pesiList[0].segType, 0x18, 'Segment 0 type = ICS (0x18)');
   assertEq(pesiList[0].pts, ICS_PTS, 'ICS PES PTS = ics_pts');
   assertEq(pesiList[0].dts, ICS_DTS, 'ICS PES DTS = ics_dts');
 
-  // Segment 1: PDS — PTS must equal ics_dts (hardware timing fix)
+  // PDS: PTS=ics_dts, no DTS (unchanged from v1.10.14)
   assertEq(pesiList[1].segType, 0x14, 'Segment 1 type = PDS (0x14)');
-  assertEq(pesiList[1].pts, ICS_DTS, 'PDS PES PTS = ics_dts (not ics_pts) — hardware timing fix');
-  assertEq(pesiList[1].dts, null,    'PDS PES has no DTS');
+  assertEq(pesiList[1].pts, ICS_DTS, 'PDS PES PTS = ics_dts');
+  assertEq(pesiList[1].dts, null,    'PDS PES has no DTS (flags2=0x80)');
 
-  // Segment 2: WDS — PTS must equal ics_dts
+  // WDS: PTS=ics_dts, no DTS (unchanged from v1.10.14)
   assertEq(pesiList[2].segType, 0x17, 'Segment 2 type = WDS (0x17)');
-  assertEq(pesiList[2].pts, ICS_DTS, 'WDS PES PTS = ics_dts (not ics_pts) — hardware timing fix');
+  assertEq(pesiList[2].pts, ICS_DTS, 'WDS PES PTS = ics_dts');
 
-  // Segments 3, 4: ODS — PTS must equal ics_dts
+  // ODS[0]: DTS=ICS_DTS, PTS=ICS_DTS+decode_time (v1.10.15 fix)
   assertEq(pesiList[3].segType, 0x15, 'Segment 3 type = ODS (0x15)');
-  assertEq(pesiList[3].pts, ICS_DTS, 'ODS[0] PES PTS = ics_dts (not ics_pts) — hardware timing fix');
-  assertEq(pesiList[4].segType, 0x15, 'Segment 4 type = ODS (0x15)');
-  assertEq(pesiList[4].pts, ICS_DTS, 'ODS[1] PES PTS = ics_dts (not ics_pts) — hardware timing fix');
+  assertEq(pesiList[3].dts, ODS0_DTS, 'ODS[0] DTS = ICS_DTS (chained pipeline, v1.10.15)');
+  assertEq(pesiList[3].pts, ODS0_PTS, 'ODS[0] PTS = ICS_DTS + ceil(w*h/90) (v1.10.15)');
+  assertEq((pesiList[3].flags2 & 0xC0) >> 6, 3, 'ODS[0] flags2 has both PTS+DTS bits (0xC0)');
 
-  // Last segment: END — PTS must equal ics_pts (end of display set, after all data decoded)
+  // ODS[1]: DTS=ODS[0].PTS, PTS=ODS[0].PTS+decode_time (chained)
+  assertEq(pesiList[4].segType, 0x15, 'Segment 4 type = ODS (0x15)');
+  assertEq(pesiList[4].dts, ODS1_DTS, 'ODS[1] DTS = ODS[0].PTS (chained pipeline, v1.10.15)');
+  assertEq(pesiList[4].pts, ODS1_PTS, 'ODS[1] PTS = ODS[0].PTS + ceil(w*h/90) (v1.10.15)');
+  assertEq((pesiList[4].flags2 & 0xC0) >> 6, 3, 'ODS[1] flags2 has both PTS+DTS bits (0xC0)');
+
+  // END: PTS = last ODS PTS (v1.10.15 fix — was ICS PTS in v1.10.14, which was wrong)
   const endSeg = pesiList[pesiList.length - 1];
-  assertEq(endSeg.segType, 0x80,    'Last segment type = END (0x80)');
-  assertEq(endSeg.pts, ICS_PTS,     'END PES PTS = ics_pts (not ics_dts)');
+  assertEq(endSeg.segType, 0x80, 'Last segment type = END (0x80)');
+  assertEq(endSeg.pts, END_PTS,  'END PES PTS = last ODS PTS (v1.10.15, confirmed vs Toast)');
+  assertEq(endSeg.dts, null,     'END PES has no DTS (flags2=0x80)');
+}
+
+console.log('\n=== 15: ODS decode_time = ceil(w*h/90), verified vs Toast raw bytes ===');
+{
+  // Toast hardware reference formula: decode_time = ceil(w*h/90) ticks at 90kHz.
+  // Empirically verified: 22×22→6, 16×16→3, 16×17→4, 79×46→41.
+  // Test that our encoder uses the same formula for a range of sizes.
+  function getOdsTiming(w, h) {
+    const ds = buildIGDisplaySet({
+      composition: {
+        videoWidth: 1920, videoHeight: 1080, frameRate: 0x40,
+        compositionNumber: 0, compositionState: 2,
+        streamModel: false, uiModel: false,
+        compositionTimeoutPts: 0, selectionTimeoutPts: 0, userTimeoutMs: 0,
+        pages: [{ id: 0, version: 0, uoMask: Buffer.alloc(8),
+          animationFrameRateCode: 0, defaultSelectedButtonIdRef: 0,
+          defaultActivatedButtonIdRef: 0xFFFF, paletteIdRef: 0, bogs: [] }],
+      },
+      palette: { paletteId: 0, version: 0, entries: [] },
+      windows: [],
+      objects: [{ objectId: 0, version: 0, width: w, height: h, pixels: new Uint8Array(w * h).fill(0) }],
+      pid: 0x1400, pts: 54000000,
+    });
+    function decodePts(b) {
+      return ((b[0] & 0x0E) << 29) | (b[1] << 22) | ((b[2] & 0xFE) << 14) | (b[3] << 7) | ((b[4] & 0xFE) >> 1);
+    }
+    let off = 0;
+    while (off + 188 <= ds.length) {
+      const pkt = ds.slice(off, off + 188);
+      if (pkt[0] !== 0x47 || !(pkt[1] & 0x40)) { off += 188; continue; }
+      const hasAdapt = (pkt[3] & 0x20) !== 0;
+      const ps = hasAdapt ? (4 + 1 + pkt[4]) : 4;
+      const pes = pkt.slice(ps);
+      if (pes[0] !== 0 || pes[1] !== 0 || pes[2] !== 1) { off += 188; continue; }
+      const flags2 = pes[7]; const hasDts = (flags2 & 0x40) !== 0;
+      const payloadOff = 9 + pes[8];
+      const segType = payloadOff < pes.length ? pes[payloadOff] : null;
+      if (segType === 0x15) {
+        const pts = decodePts(pes.slice(9, 14));
+        const dts = hasDts ? decodePts(pes.slice(14, 19)) : null;
+        return { pts, dts, decodeTime: pts - dts };
+      }
+      off += 188;
+    }
+    return null;
+  }
+
+  const ICS_DTS = 54000000 - 11664;
+  // Toast-verified cases
+  const t22 = getOdsTiming(22, 22);  // 484 px → ceil(484/90)=6
+  assertEq(t22.dts, ICS_DTS, '22×22 ODS DTS = ICS_DTS');
+  assertEq(t22.decodeTime, 6, '22×22 decode_time = ceil(484/90) = 6 (matches Toast)');
+
+  const t16_16 = getOdsTiming(16, 16);  // 256 px → ceil(256/90)=3
+  assertEq(t16_16.decodeTime, 3, '16×16 decode_time = ceil(256/90) = 3 (matches Toast)');
+
+  const t16_17 = getOdsTiming(16, 17);  // 272 px → ceil(272/90)=4
+  assertEq(t16_17.decodeTime, 4, '16×17 decode_time = ceil(272/90) = 4 (matches Toast)');
+
+  const t79_46 = getOdsTiming(79, 46);  // 3634 px → ceil(3634/90)=41
+  assertEq(t79_46.decodeTime, 41, '79×46 decode_time = ceil(3634/90) = 41 (matches Toast)');
+
+  // Minimum: 1×1 = 1 px → ceil(1/90) rounds to 0 but clamped to 1
+  const t1_1 = getOdsTiming(1, 1);
+  assertEq(t1_1.decodeTime, 1, '1×1 decode_time clamped to minimum 1');
 }
 
 // ─── Summary ──────────────────────────────────────────────────────────────────

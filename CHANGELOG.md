@@ -1,5 +1,59 @@
 # Changelog
 
+## v1.10.15 — 2026-05-22
+
+**Hardware IG fix — ODS DTS decode pipeline + END timing (confirmed vs Toast hardware reference)**
+
+Root cause of LG BP350 and Xbox showing no buttons on IG menus across all v1.10.x versions.
+The ODS segments lacked DTS, preventing hardware T-STD schedulers from timing object decodes.
+
+### Root cause
+
+BD-ROM hardware IG controllers use ODS.DTS to schedule when each object is decoded into the
+object plane buffer. Without DTS (flags2=0x80, PTS-only), the hardware cannot schedule the
+decode and silently skips object rendering — producing the "navy background, no buttons" symptom
+observed on LG BP350 and Xbox since v1.10.0.
+
+Software players (libbluray) do not implement T-STD object timing — they decode all available
+objects into a cache regardless of DTS. This explains why buttons rendered in software but not
+on hardware across all eight prior fix iterations (v1.10.7–v1.10.14).
+
+### Fix
+
+`buildIGDisplaySet` in `src/lib/ig-encoder.js`:
+
+1. **ODS DTS chained pipeline** (confirmed from Toast raw bytes, proven on LG BP350):
+   - `ODS[0].DTS = ICS.DTS` (= `ics_pts − 11664`)
+   - `ODS[i].DTS = ODS[i-1].PTS` (chained)
+   - `ODS[i].PTS = ODS[i].DTS + ceil(w × h / 90)` (decode_time at 90kHz)
+   - `ODS flags2 = 0xC0` (PTS+DTS, 10-byte header)
+
+2. **END.PTS = last ODS PTS** (was `ICS.PTS` in v1.10.14, which was wrong):
+   - `END.PTS = last ODS PTS` (= `ICS.DTS + sum(decode_times)`)
+   - Toast confirmed: `END.PTS − last_ODS.PTS = 0`
+
+3. **CC tracking updated**: `pesHdrSize = 19` for ODS (PTS+DTS); result: 0 CC issues.
+
+### Verification
+
+Toast hardware reference (proven on LG BP350) vs our v1.10.14 vs v1.10.15:
+
+| Segment | Toast | v1.10.14 | v1.10.15 |
+|---------|-------|----------|----------|
+| ICS flags2 | 0xC0 | 0xC0 ✓ | 0xC0 ✓ |
+| ICS DTS | ICS_DTS | ICS_DTS ✓ | ICS_DTS ✓ |
+| PDS PTS | ICS_DTS | ICS_DTS ✓ | ICS_DTS ✓ |
+| ODS flags2 | **0xC0** | **0x80 ✗** | **0xC0 ✓ fixed** |
+| ODS[0] DTS | ICS_DTS | None ✗ | ICS_DTS ✓ fixed |
+| ODS[i] DTS | ODS[i-1].PTS | None ✗ | ODS[i-1].PTS ✓ fixed |
+| END.PTS | last ODS PTS | ICS.PTS ✗ | last ODS PTS ✓ fixed |
+
+decode_time formula `ceil(w×h/90)` verified against 4 Toast ODS cases:
+22×22→6 ✓, 16×16→3 ✓, 16×17→4 ✓, 79×46→41 ✓
+
+Tests: 149 passed (ig-encoder.test.js) + 24 passed (rewrite-video-pes-dts.test.js).
+ISO: `~/Desktop/v11015_test.iso`
+
 ## v1.10.14 — 2026-05-21
 
 **Hardware IG fix — PDS/WDS/ODS PES PTS = ICS DTS (presentation clock gating)**
