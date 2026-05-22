@@ -1,5 +1,49 @@
 # Changelog
 
+## v1.10.14 — 2026-05-21
+
+**Hardware IG fix — PDS/WDS/ODS PES PTS = ICS DTS (presentation clock gating)**
+
+Root cause of LG BP350 and Xbox showing no buttons on IG menus while software
+(libbluray/VLC) rendered correctly.
+
+### Root cause
+
+BD-ROM hardware IG controllers are PTS-gated: they only decode a segment when
+the player's presentation clock reaches that segment's PTS. The ICS composition
+phase fires at `ICS.DTS` (decode deadline, ~130ms before `ICS.PTS`). Supporting
+segments (PDS/WDS/ODS) must have `PTS ≤ ICS.DTS` so palette and objects are
+decoded before composition begins.
+
+Our v1.10.13 disc had `PDS/WDS/ODS PTS = ICS.PTS = 54000000`. Hardware started
+composing at `ICS.DTS = 53988336` and found no decoded objects — silently
+discarded the display set. Clannad reference: `PDS PTS = 53988336 = ICS.DTS`.
+
+### Fix
+
+- `PDS/WDS/ODS PES PTS` changed from `ics_pts` → `ics_dts` in `buildIGDisplaySet`
+- `ICS PES`: unchanged — `PTS = ics_pts`, `DTS = ics_dts`
+- `END PES PTS`: unchanged — kept at `ics_pts` (Clannad's END > ics_pts; ours at
+  ics_pts is correct for our smaller ODS pipeline)
+- `ics_dts = max(0, ics_pts − 11664)` — 11664 ticks ≈ 129.6ms (existing formula)
+
+### Verification
+
+Confirmed against Clannad 00005.m2ts per-segment PTS/DTS extraction:
+
+| Segment | Clannad PTS  | Our v1.10.13 PTS | Our v1.10.14 PTS | Correct |
+|---------|-------------|-----------------|-----------------|---------|
+| ICS     | 54000000    | 54000000        | 54000000        | ✓       |
+| PDS     | 53988336    | **54000000**    | 53988336        | ✓ fixed |
+| WDS     | (absent)    | **54000000**    | 53988336        | ✓ fixed |
+| ODS     | 53989053+   | **54000000**    | 53988336        | ✓ fixed |
+| END     | 54014013    | 54000000        | 54000000        | ✓       |
+
+138 ig-encoder tests + 24 video-PES-DTS tests pass (162 total).
+New test: section 14 asserts PDS/WDS/ODS PTS = ics_dts, END PTS = ics_pts.
+
+---
+
 ## v1.11.0 — 2026-05-21
 
 **Autoplay-only default; menus promoted to beta opt-in**

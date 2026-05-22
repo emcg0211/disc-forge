@@ -633,20 +633,30 @@ function buildIGDisplaySet({ composition, palette, windows, objects, pid, pts })
   // s->complete stays 0, and GC_CTRL_INIT_MENU is never called.
   // CC must be continuous across all PES packets for the same PID.
   //
-  // ICS PES requires DTS in addition to PTS (Clannad reference confirmed):
-  // hardware IG controllers use DTS to schedule pre-buffered ODS/PDS loading
-  // before the composition display time. PDS/ODS/END use PTS-only.
-  // DTS delta 11664 ticks (~130ms) matches Clannad's reference disc pattern.
+  // ics_dts = decode deadline = ics_pts − 11664 ticks (≈130ms).
+  // Used as PTS for all supporting segments (PDS/WDS/ODS) so hardware IG controllers
+  // have palette+objects decoded before the ICS composition phase at ics_dts.
+  // ICS itself: PTS=ics_pts, DTS=ics_dts. END: PTS=ics_pts (after all data).
+  // Clannad reference confirmed: PDS PTS = ICS DTS = 53988336. (v1.10.14 fix)
   const icsDts = Math.max(0, (pts || 0) - 11664);
 
+  // ICS: PTS=ics_pts DTS=ics_dts (hardware schedules composition at ICS DTS)
+  // PDS/WDS/ODS: PTS=ics_dts so palette+objects are decoded BEFORE ICS composition time.
+  //   Hardware IG controllers are PTS-gated: supporting data must be released (PTS ≤ ICS DTS)
+  //   before the ICS composition phase starts. Clannad verified: PDS PTS = ICS DTS.
+  // END: PTS=ics_pts (comes after all supporting data; Clannad's END > ICS PTS due to large
+  //   ODS pipeline — for our small ODS the composition deadline works fine as upper bound).
   const segments = [ics, pds, wds, ...ods, end];
+  const lastIdx = segments.length - 1;
   let cc = 0;
   const pesPackets = segments.map((seg, idx) => {
-    const segDts = (idx === 0) ? icsDts : null;  // DTS only for ICS (first segment)
-    // ICS PES has a 10-byte header (PTS+DTS); others have 5-byte header (PTS only).
-    // The PES header overhead is: 9 fixed bytes + 5 or 10 timestamp bytes = 14 or 19 bytes.
-    const pesHdrSize = (idx === 0) ? 19 : 14;
-    const pkt = wrapInPES(seg, pid, pts, cc, segDts);
+    const isICS = idx === 0;
+    const isEND = idx === lastIdx;
+    // ICS and END keep ics_pts; supporting segments (PDS/WDS/ODS) use ics_dts
+    const segPts = (isICS || isEND) ? pts : icsDts;
+    const segDts = isICS ? icsDts : null;  // DTS only for ICS
+    const pesHdrSize = isICS ? 19 : 14;
+    const pkt = wrapInPES(seg, pid, segPts, cc, segDts);
     cc = (cc + Math.ceil((pesHdrSize + seg.length) / 184)) & 0x0F;
     return pkt;
   });

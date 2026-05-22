@@ -852,6 +852,95 @@ console.log('\n=== 13: patchPmtForIG with audio ES already in PMT (v1.10.13) ===
   assertEq(Buffer.compare(patched, patched2), 0, 'patchPmtForIG: idempotent with audio+IG in PMT');
 }
 
+console.log('\n=== 14: PDS/WDS/ODS PES PTS = ics_dts, not ics_pts (v1.10.14 hardware timing fix) ===');
+{
+  // Root cause of hardware-only IG failure (LG BP350, Xbox):
+  //   PDS/WDS/ODS had PTS=ics_pts → hardware IG controller (PTS-gated) couldn't decode
+  //   supporting data before ICS composition phase at ics_dts.
+  // Fix: PDS/WDS/ODS PTS must equal ics_dts so they're available at decode deadline.
+  // ICS: PTS=ics_pts, DTS=ics_dts.  END: PTS=ics_pts.
+  // Clannad reference: PDS PTS = 53988336 = ICS DTS = ICS PTS - 11664.
+  const ICS_PTS = 54000000;
+  const ICS_DTS = ICS_PTS - 11664;  // 53988336
+
+  const ds = buildIGDisplaySet({
+    composition: {
+      videoWidth: 1920, videoHeight: 1080, frameRate: 0x40,
+      compositionNumber: 0, compositionState: 2,
+      streamModel: false, uiModel: false,
+      compositionTimeoutPts: 0, selectionTimeoutPts: 0,
+      userTimeoutMs: 0,
+      pages: [{ id: 0, version: 0, uoMask: Buffer.alloc(8),
+        animationFrameRateCode: 0, defaultSelectedButtonIdRef: 0,
+        defaultActivatedButtonIdRef: 0xFFFF, paletteIdRef: 0, bogs: [] }],
+    },
+    palette: { paletteId: 0, version: 0, entries: [{ id: 0, Y: 16, Cr: 128, Cb: 128, T: 255 }] },
+    windows: [{ id: 0, x: 0, y: 0, width: 100, height: 100 }],
+    objects: [
+      { objectId: 0, version: 0, width: 1, height: 1, pixels: new Uint8Array([0]) },
+      { objectId: 1, version: 0, width: 1, height: 1, pixels: new Uint8Array([0]) },
+    ],
+    pid: 0x1400, pts: ICS_PTS,
+  });
+
+  // Helper: decode PTS from a 5-byte PTS field
+  function decodePts(b) {
+    return ((b[0] & 0x0E) << 29) | (b[1] << 22) | ((b[2] & 0xFE) << 14) | (b[3] << 7) | ((b[4] & 0xFE) >> 1);
+  }
+
+  // Walk TS packets and collect PTS for each PUSI PES in order.
+  // Segment order: ICS(0x18) PDS(0x14) WDS(0x17) ODS(0x15) ODS(0x15) END(0x80)
+  const pesiList = [];  // {segType, pts, dts, flags2}
+  let off = 0;
+  while (off + 188 <= ds.length) {
+    const pkt = ds.slice(off, off + 188);
+    if (pkt[0] !== 0x47) { off += 188; continue; }
+    if (!(pkt[1] & 0x40)) { off += 188; continue; }  // not PUSI
+    const hasAdapt = (pkt[3] & 0x20) !== 0;
+    const ps = hasAdapt ? (4 + 1 + pkt[4]) : 4;
+    const pes = pkt.slice(ps);
+    if (pes[0] !== 0 || pes[1] !== 0 || pes[2] !== 1) { off += 188; continue; }
+    const flags2 = pes[7];
+    const hasPts = (flags2 & 0x80) !== 0;
+    const hasDts = (flags2 & 0x40) !== 0;
+    const ptsVal = hasPts ? decodePts(pes.slice(9, 14)) : null;
+    const dtsVal = hasDts ? decodePts(pes.slice(14, 19)) : null;
+    // payload starts at pes[9 + pes[8]]; segment type is first byte of payload
+    const payloadOff = 9 + pes[8];
+    const segType = payloadOff < pes.length ? pes[payloadOff] : null;
+    pesiList.push({ segType, pts: ptsVal, dts: dtsVal, flags2 });
+    off += 188;
+  }
+
+  // Expect at least ICS + PDS + WDS + ODS + ODS + END = 6 PES packets
+  assert(pesiList.length >= 6, `buildIGDisplaySet produces >= 6 PES packets (got ${pesiList.length})`);
+
+  // Segment 0: ICS — PTS=ics_pts, DTS=ics_dts
+  assertEq(pesiList[0].segType, 0x18, 'Segment 0 type = ICS (0x18)');
+  assertEq(pesiList[0].pts, ICS_PTS, 'ICS PES PTS = ics_pts');
+  assertEq(pesiList[0].dts, ICS_DTS, 'ICS PES DTS = ics_dts');
+
+  // Segment 1: PDS — PTS must equal ics_dts (hardware timing fix)
+  assertEq(pesiList[1].segType, 0x14, 'Segment 1 type = PDS (0x14)');
+  assertEq(pesiList[1].pts, ICS_DTS, 'PDS PES PTS = ics_dts (not ics_pts) — hardware timing fix');
+  assertEq(pesiList[1].dts, null,    'PDS PES has no DTS');
+
+  // Segment 2: WDS — PTS must equal ics_dts
+  assertEq(pesiList[2].segType, 0x17, 'Segment 2 type = WDS (0x17)');
+  assertEq(pesiList[2].pts, ICS_DTS, 'WDS PES PTS = ics_dts (not ics_pts) — hardware timing fix');
+
+  // Segments 3, 4: ODS — PTS must equal ics_dts
+  assertEq(pesiList[3].segType, 0x15, 'Segment 3 type = ODS (0x15)');
+  assertEq(pesiList[3].pts, ICS_DTS, 'ODS[0] PES PTS = ics_dts (not ics_pts) — hardware timing fix');
+  assertEq(pesiList[4].segType, 0x15, 'Segment 4 type = ODS (0x15)');
+  assertEq(pesiList[4].pts, ICS_DTS, 'ODS[1] PES PTS = ics_dts (not ics_pts) — hardware timing fix');
+
+  // Last segment: END — PTS must equal ics_pts (end of display set, after all data decoded)
+  const endSeg = pesiList[pesiList.length - 1];
+  assertEq(endSeg.segType, 0x80,    'Last segment type = END (0x80)');
+  assertEq(endSeg.pts, ICS_PTS,     'END PES PTS = ics_pts (not ics_dts)');
+}
+
 // ─── Summary ──────────────────────────────────────────────────────────────────
 
 console.log(`\n${'─'.repeat(50)}`);
