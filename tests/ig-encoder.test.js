@@ -1126,7 +1126,7 @@ console.log('\n=== 16: buildMenuDisplaySet produces 1-based button IDs (v1.10.17
   assert(r1.buttonIds.every(id => id >= 1), '1-episode: all button_ids ≥ 1 (v1.10.17 fix)');
   assert(!r1.buttonIds.includes(0), '1-episode: no button_id=0 present');
   assertEq(r1.buttonIds[0], 1, '1-episode: first button_id = 1 (was 0 pre-fix)');
-  assertEq(r1.defSelBtn, 1, '1-episode: defaultSelectedButtonIdRef = 1 (was 0 pre-fix)');
+  assertEq(r1.defSelBtn, 0xFFFF, '1-episode: defaultSelectedButtonIdRef = 0xFFFF (v1.10.18 Toast-template: no default selection)');
   assertEq(r1.defValidBtns[0], 1, '1-episode BOG0: defaultValidButtonIdRef = 1 (was 0 pre-fix)');
 
   const ds2 = buildMenuDisplaySet({ playlists: [1, 2], pts: 54000000, labels: ['Episode 1', 'Episode 2'] });
@@ -1135,12 +1135,184 @@ console.log('\n=== 16: buildMenuDisplaySet produces 1-based button IDs (v1.10.17
   assert(!r2.buttonIds.includes(0), '2-episode: no button_id=0 present');
   assertEq(r2.buttonIds[0], 1, '2-episode: button[0].id = 1');
   assertEq(r2.buttonIds[1], 2, '2-episode: button[1].id = 2');
-  assertEq(r2.defSelBtn, 1, '2-episode: defaultSelectedButtonIdRef = 1');
+  assertEq(r2.defSelBtn, 0xFFFF, '2-episode: defaultSelectedButtonIdRef = 0xFFFF (v1.10.18 Toast-template)');
   assertEq(r2.defValidBtns[0], 1, '2-episode BOG0: defaultValidButtonIdRef = 1');
   assertEq(r2.defValidBtns[1], 2, '2-episode BOG1: defaultValidButtonIdRef = 2');
 
   // Neighbor references must also be 1-based (no 0 references)
   // This is verified by checking all button IDs are 1-based — neighbor refs use same IDs
+}
+
+console.log('\n=== 17: buildMenuDisplaySet Toast-template structure (v1.10.18) ===');
+{
+  // v1.10.18 structural rewrite: the menu IG follows the BD-ROM IG conventions
+  // observed across commercial authoring tools (docs/v11018_toast_template_spec.md):
+  //   - 2 epoch_start display sets (composition_number 0 and 1)
+  //   - normal_state obj = 0xFFFF (invisible); ONE object/button for sel+act
+  //   - page.defaultSelectedButtonIdRef = 0xFFFF (no default selection)
+  //   - NO WDS segment
+  //   - ODS decode_time = ceil(w*h/90), chained from ICS.DTS
+  //   - ICS PTS-DTS = 12012; DTS leading nibble = 0x0
+  const { buildMenuDisplaySet } = require(path.join(__dirname, '..', 'src', 'lib', 'menu-builder.js'));
+
+  // Walk IG PID PES packets, return ordered list of {segType, pts, dts, dtsNibble, seg}
+  function walkIG(m2tsBuffer) {
+    const IG_PID = 0x1400;
+    const out = [];
+    let cur = null;
+    function flush(c) {
+      const full = Buffer.concat(c.chunks);
+      if (full.length < 9) return;
+      if (full[0] !== 0 || full[1] !== 0 || full[2] !== 1) return;
+      const flags2 = full[7], hdrLen = full[8];
+      let pts = null, dts = null, dtsNibble = null;
+      if (flags2 & 0x80) {
+        const b = full.slice(9, 14);
+        pts = ((b[0] & 0x0e) * (1 << 29)) + (b[1] * (1 << 22)) + ((b[2] & 0xfe) * (1 << 14)) + (b[3] * (1 << 7)) + ((b[4] & 0xfe) >> 1);
+      }
+      if (flags2 & 0x40) {
+        const b = full.slice(14, 19);
+        dtsNibble = (b[0] >> 4) & 0x0F;
+        dts = ((b[0] & 0x0e) * (1 << 29)) + (b[1] * (1 << 22)) + ((b[2] & 0xfe) * (1 << 14)) + (b[3] * (1 << 7)) + ((b[4] & 0xfe) >> 1);
+      }
+      const seg = full.slice(9 + hdrLen);
+      out.push({ segType: seg[0], pts, dts, dtsNibble, seg });
+    }
+    let i = 0;
+    while (i + 188 <= m2tsBuffer.length) {
+      if (m2tsBuffer[i] !== 0x47) { i++; continue; }
+      const pid = ((m2tsBuffer[i + 1] & 0x1F) << 8) | m2tsBuffer[i + 2];
+      if (pid !== IG_PID) { i += 188; continue; }
+      const pusi = (m2tsBuffer[i + 1] & 0x40) !== 0;
+      const ha = (m2tsBuffer[i + 3] & 0x20) !== 0;
+      const ps = ha ? (4 + 1 + m2tsBuffer[i + 4]) : 4;
+      const pl = m2tsBuffer.slice(i + ps, i + 188);
+      if (pusi) { if (cur) flush(cur); cur = { chunks: [pl] }; }
+      else if (cur) cur.chunks.push(pl);
+      i += 188;
+    }
+    if (cur) flush(cur);
+    return out;
+  }
+
+  // Parse ICS button state model from an ICS segment buffer
+  function parseICS(seg) {
+    const compNumber = (seg[8] << 8) | seg[9];   // vd5(5)=3..7? layout: [3,4]=W [5,6]=H [7]=fr  [8,9]=compNum
+    const compState = (seg[10] >> 6) & 3;
+    // body after vd5(5)+cd(3)+sd(1)=9 -> +3-byte segHdr = offset 3; we already indexed raw seg incl 3-byte header
+    // seg[0..2]=segHdr, seg[3..7]=vd5, seg[8..10]=cd, seg[11]=sd, seg[12..14]=icDataLen, seg[15]=model...
+    let p = 15;
+    p += 1;                 // stream/ui model
+    p += 5 + 5;             // composition_timeout + selection_timeout (InMux)
+    p += 3;                 // user_timeout
+    const numPages = seg[p]; p += 1;
+    const page = { bogs: [] };
+    page.id = seg[p++]; page.version = seg[p++];
+    p += 8;                 // uo_mask
+    p += 2; p += 2;         // in_effects(0,0) out_effects(0,0)
+    page.animFr = seg[p++];
+    page.defSelBtn = (seg[p] << 8) | seg[p + 1]; p += 2;
+    page.defActBtn = (seg[p] << 8) | seg[p + 1]; p += 2;
+    page.palIdRef = seg[p++];
+    page.numBogs = seg[p++];
+    for (let bg = 0; bg < page.numBogs; bg++) {
+      const defValid = (seg[p] << 8) | seg[p + 1]; p += 2;
+      const numBtns = seg[p++];
+      const buttons = [];
+      for (let bn = 0; bn < numBtns; bn++) {
+        const b = {};
+        b.id = (seg[p] << 8) | seg[p + 1]; p += 2;
+        p += 2;             // numeric_select
+        p += 1;             // auto_action
+        p += 2; p += 2;     // x, y
+        b.upper = (seg[p] << 8) | seg[p + 1]; p += 2;
+        b.lower = (seg[p] << 8) | seg[p + 1]; p += 2;
+        b.left  = (seg[p] << 8) | seg[p + 1]; p += 2;
+        b.right = (seg[p] << 8) | seg[p + 1]; p += 2;
+        b.normStart = (seg[p] << 8) | seg[p + 1]; p += 2;
+        b.normEnd   = (seg[p] << 8) | seg[p + 1]; p += 2;
+        p += 1;             // norm flags
+        p += 1;             // sel sound
+        b.selStart = (seg[p] << 8) | seg[p + 1]; p += 2;
+        b.selEnd   = (seg[p] << 8) | seg[p + 1]; p += 2;
+        p += 1;             // sel flags
+        p += 1;             // act sound
+        b.actStart = (seg[p] << 8) | seg[p + 1]; p += 2;
+        b.actEnd   = (seg[p] << 8) | seg[p + 1]; p += 2;
+        const numNav = (seg[p] << 8) | seg[p + 1]; p += 2;
+        p += numNav * 12;
+        buttons.push(b);
+      }
+      page.bogs.push({ defValid, buttons });
+    }
+    return { compNumber, compState, page };
+  }
+
+  const ds = buildMenuDisplaySet({ playlists: [1, 2, 3], pts: 54000000, labels: ['Ep 1', 'Ep 2', 'Ep 3'] });
+  const segs = walkIG(ds);
+
+  const icsList = segs.filter(s => s.segType === 0x18);
+  const wdsList = segs.filter(s => s.segType === 0x17);
+  const odsList = segs.filter(s => s.segType === 0x15);
+
+  // (1) two display sets
+  assertEq(icsList.length, 2, 'two display sets (2 ICS segments)');
+
+  // (2) both epoch_start; composition_number 0 then 1
+  const ics0 = parseICS(icsList[0].seg);
+  const ics1 = parseICS(icsList[1].seg);
+  assertEq(ics0.compState, 2, 'DS1 composition_state = epoch_start (2)');
+  assertEq(ics1.compState, 2, 'DS2 composition_state = epoch_start (2)');
+  assertEq(ics0.compNumber, 0, 'DS1 composition_number = 0');
+  assertEq(ics1.compNumber, 1, 'DS2 composition_number = 1');
+
+  // (3) page defaultSelectedButtonIdRef = 0xFFFF
+  assertEq(ics0.page.defSelBtn, 0xFFFF, 'DS1 page.defaultSelectedButtonIdRef = 0xFFFF');
+  assertEq(ics1.page.defSelBtn, 0xFFFF, 'DS2 page.defaultSelectedButtonIdRef = 0xFFFF');
+
+  // (4) every button: normal_state obj = 0xFFFF; selected/activated point to a real ODS (= button index)
+  const objIds = new Set(odsList.map(o => (o.seg[3] << 8) | o.seg[4]));
+  let allNormFFFF = true, allSelReal = true, selEqAct = true;
+  for (const ics of [ics0, ics1]) {
+    ics.page.bogs.forEach((bog, idx) => {
+      const b = bog.buttons[0];
+      if (b.normStart !== 0xFFFF || b.normEnd !== 0xFFFF) allNormFFFF = false;
+      if (!objIds.has(b.selStart) || b.selStart !== idx) allSelReal = false;
+      if (b.actStart !== b.selStart) selEqAct = false;
+    });
+  }
+  assert(allNormFFFF, 'all buttons: normal_state object_id_ref = 0xFFFF (invisible)');
+  assert(allSelReal, 'all buttons: selected_state object_id_ref points to a real ODS (= button index)');
+  assert(selEqAct, 'all buttons: activated_state object = selected_state object (one bitmap/button)');
+
+  // (5) no WDS segment in either display set
+  assertEq(wdsList.length, 0, 'no WDS segment present (Toast-template)');
+
+  // (6) one ODS per button per display set (3 buttons × 2 DS = 6 ODS)
+  assertEq(odsList.length, 6, 'one ODS per button per display set (3×2 = 6)');
+
+  // (7) ICS PTS-DTS lead = 12012
+  assertEq(icsList[0].pts - icsList[0].dts, 12012, 'DS1 ICS PTS-DTS lead = 12012');
+  assertEq(icsList[1].pts - icsList[1].dts, 12012, 'DS2 ICS PTS-DTS lead = 12012');
+
+  // (8) DTS leading nibble = 0x0 on ICS and ODS PES
+  assertEq(icsList[0].dtsNibble, 0x0, 'ICS PES DTS leading nibble = 0x0');
+  assertEq(odsList[0].dtsNibble, 0x0, 'ODS PES DTS leading nibble = 0x0');
+
+  // (9) ODS decode_time = ceil(w*h/90), chained from ICS.DTS within DS1
+  //     800×90 object -> ceil(72000/90) = 800 ticks each
+  const expected = Math.ceil((800 * 90) / 90);  // 800
+  const ds1Ods = odsList.slice(0, 3);
+  assertEq(ds1Ods[0].dts, icsList[0].dts, 'DS1 ODS[0].DTS = ICS.DTS (decode chain start)');
+  assertEq(ds1Ods[0].pts - ds1Ods[0].dts, expected, 'DS1 ODS[0] decode_time = ceil(w*h/90)');
+  assertEq(ds1Ods[1].dts, ds1Ods[0].pts, 'DS1 ODS[1].DTS = ODS[0].PTS (chained)');
+  assertEq(ds1Ods[2].dts, ds1Ods[1].pts, 'DS1 ODS[2].DTS = ODS[1].PTS (chained)');
+
+  // (10) segment order within DS1: ICS, PDS, ODS, ODS, ODS, END (no WDS)
+  const ds1End = segs.indexOf(segs.find(s => s.segType === 0x80));
+  const order1 = segs.slice(0, ds1End + 1).map(s => s.segType);
+  assertBufEq(Buffer.from(order1), Buffer.from([0x18, 0x14, 0x15, 0x15, 0x15, 0x80]),
+    'DS1 segment order = ICS PDS ODS ODS ODS END (no WDS)');
 }
 
 // ─── Summary ──────────────────────────────────────────────────────────────────

@@ -1,5 +1,68 @@
 # Changelog
 
+## v1.10.18 — 2026-05-31
+
+**Toast-template structural rewrite — IG menu matches BD-ROM Interactive Graphics
+conventions observed across commercial authoring tools**
+
+After 11 hardware iterations (v1.10.0–v1.10.17) of single-field spec fixes — none of
+which produced visible buttons on the LG BP350 — this release abandons incremental
+tuning and clones the full structural model that commercial BD-ROM authoring pipelines
+emit for in-mux interactive menus, parameterized only by what is genuinely content-
+specific to our disc (button bitmaps, positions, labels, navigation commands, playlist
+references, button count). The byte-level forensic derivation is in
+`docs/v11018_toast_template_spec.md`.
+
+### Root cause of the 11-iteration failure
+
+Every prior version used a "buttons always visible, one highlighted" state model. The
+commercial convention that standalone hardware players reliably render is the opposite:
+
+- **`normal_state` object = `0xFFFF` (invisible).** A button draws nothing in its
+  resting state.
+- **`page.default_selected_button_id_ref` = `0xFFFF` (no default selection).** The menu
+  opens to a bare background; the first arrow-key press selects (and reveals) the
+  nearest button. This is the intended UX and matches how commercial standalone-player
+  menus typically behave.
+- **One bitmap object per button**, used for *both* the selected and activated state
+  (we previously emitted three objects per button).
+
+### Other structural corrections (all confirmed against the reference disc)
+
+- **Removed the WDS segment.** Segment order is now `ICS → PDS → ODS… → END`; button
+  positions and object sizes fully define the rendered regions.
+- **Restored ODS decode budget `ceil(w·h/90)`**, chained `ODS[0].DTS = ICS.DTS`,
+  `ODS[i].DTS = ODS[i-1].PTS`. v1.10.16 had flattened this to a constant 3 ticks; the
+  reference disc uses the area formula (verified: 22×22→6, 16×16→3, 16×17→4, 79×46→41).
+- **ICS PTS−DTS lead corrected 11664 → 12012** (= 4 × 3003).
+- **IG PES DTS leading nibble 0x1 → 0x0** (the marker convention the reference emits).
+- **Two `epoch_start` display sets per menu** (composition_number 0 and 1); the
+  continuity counter runs continuously across both with no demuxer discontinuity.
+
+### Implementation
+
+- `src/lib/ig-encoder.js`: backward-compatible parameterization — `encodeDTS(dts,
+  markerHigh)`, `wrapInPES(…, dtsMarker)`, and `buildIGDisplaySet({… icsDtsLead,
+  odsDecodeMode, dtsMarker, startCC})`; WDS is emitted only when windows are supplied.
+  Defaults preserve prior behavior, so the existing encoder-primitive tests are
+  unchanged.
+- `src/lib/menu-builder.js`: `buildMenuDisplaySet` rewritten to the new state model and
+  two-display-set emission (signature unchanged).
+
+### Validation
+
+- 208 unit tests pass (184 IG-encoder incl. new Toast-template structure suite + 24
+  video-PES-DTS). The two obsolete `defaultSelectedButtonIdRef = 1` assertions from
+  v1.10.17 were updated to `0xFFFF`.
+- Wire-level: extracted `00099.m2ts` shows two display sets, no WDS, DTS nibble 0x0,
+  ICS lead 12012, chained ODS, PMT declares IG (type 0x91 @ PID 0x1400).
+- libbluray `bd_info`/`bd_list_titles` clean (2 HDMV titles; 00099.mpls declares IG:1).
+- Structural diff vs the reference disc: display-set count, WDS absence, ICS lead, and
+  DTS marker all match.
+- ISO at `~/Desktop/v11018_test.iso` (hardware test on the LG BP350 pending).
+
+The v1.11.0 autoplay-default code path is untouched; menus remain opt-in beta.
+
 ## v1.10.17 — 2026-05-31
 
 **Root-cause hardware fix — button_id 1-based (BD spec §5.7.4: valid range [1, 0xEFFF])**
