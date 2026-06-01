@@ -199,19 +199,20 @@ function buildMenuDisplaySet({ videoWidth = 1920, videoHeight = 1080, playlists 
     };
   });
 
-  // One BOG per button, circular up/down navigation
+  // One BOG per button, circular up/down navigation.
+  // Button IDs are 1-based per BD spec (valid range [1, 0xEFFF]; 0 is reserved).
   const bogs = playlistIds.map((pl, i) => ({
-    defaultValidButtonIdRef: i,
+    defaultValidButtonIdRef: i + 1,
     buttons: [{
-      id:                 i,
+      id:                 i + 1,
       numericSelectValue: i + 1,
       autoActionFlag:     false,
       x:                  btnX,
       y:                  btnY[i],
-      upperBtnId:         (i - 1 + N) % N,
-      lowerBtnId:         (i + 1) % N,
-      leftBtnId:          i,
-      rightBtnId:         i,
+      upperBtnId:         ((i - 1 + N) % N) + 1,
+      lowerBtnId:         ((i + 1) % N) + 1,
+      leftBtnId:          i + 1,
+      rightBtnId:         i + 1,
       normalStartObjId:   i * 3,      normalEndObjId: i * 3,      normalRepeat: false,
       selectedSoundId:    0xFF,
       selStartObjId:      i * 3 + 1,  selEndObjId: i * 3 + 1,  selRepeat: false,
@@ -243,7 +244,7 @@ function buildMenuDisplaySet({ videoWidth = 1920, videoHeight = 1080, playlists 
         id: 0, version: 0,
         uoMask: Buffer.alloc(8),
         animationFrameRateCode:      0,
-        defaultSelectedButtonIdRef:  0,
+        defaultSelectedButtonIdRef:  1,
         defaultActivatedButtonIdRef: 0xFFFF,
         paletteIdRef: 0,
         bogs,

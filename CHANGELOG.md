@@ -1,5 +1,42 @@
 # Changelog
 
+## v1.10.17 — 2026-05-31
+
+**Root-cause hardware fix — button_id 1-based (BD spec §5.7.4: valid range [1, 0xEFFF])**
+
+All 10 prior menu iterations (v1.10.0–v1.10.16) produced button_id=0 for the first
+button. BD spec mandates button_id ∈ [1, 0xEFFF]; value 0 is reserved. LG BP350 (and
+likely other hardware players) silently discard the Interactive Composition page when
+defaultSelectedButtonIdRef=0 cannot resolve to a valid button, producing navy background
+with no buttons visible across every test burn.
+
+### Root cause
+
+`buildMenuDisplaySet` in `src/lib/menu-builder.js` used 0-based loop indices directly
+as button IDs (`id: i`), yielding button IDs 0 and 1 for a 2-episode disc. The first
+BOG's defaultValidButtonIdRef and the page's defaultSelectedButtonIdRef were both 0,
+referencing the reserved/invalid button ID.
+
+### Fix
+
+Seven field assignments in `src/lib/menu-builder.js` shifted from `i` to `i + 1`:
+- `button_id`: `i` → `i + 1`
+- `defaultValidButtonIdRef`: `i` → `i + 1`
+- Neighbor refs `upper/lower/left/right`: `(i±1+N)%N` → `((i±1+N)%N) + 1`, `i` → `i + 1`
+- Page `defaultSelectedButtonIdRef`: `0` → `1`
+
+Object IDs remain 0-based (Toast reference also uses object_id=0; only button IDs are spec-constrained to ≥ 1).
+
+### Verification
+
+Forensic comparison vs Toast reference (My Movie.iso, confirmed working on LG BP350):
+- Toast button IDs: 1, 2, 3 — our new IDs: 1, 2 ✓
+- Toast defSelBtn: 0xFFFF — our new value: 1 (equivalent for 1-based layout) ✓
+- Toast defValidBtn: 1 — our new BOG0 value: 1 ✓
+
+Tests: 163 passed (151 timing + 12 new button_id assertions).
+ISO: `~/Desktop/v11017_test.iso`
+
 ## v1.10.16 — 2026-05-31
 
 **Hardware IG fix — constant ODS decode_time=3 (LG white-screen regression from v1.10.15)**
