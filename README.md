@@ -10,19 +10,19 @@ Disc Forge turns MKV files into fully-compliant BD-ROM ISOs with proper navigati
 
 ## Features
 
-**Verified working in v1.8.0 on LG BP350 hardware:**
+**Supported workflow as of v1.11.0 (verified on LG BP350 hardware):**
 
-- **Multi-episode discs** — build a full season on a single disc; disc autoplays Episode 1, Title button cycles between episodes
+- **MKV → BD-compliant ISO conversion** — ffmpeg + tsMuxeR pipeline; MakeMKV auto-detected for ripping discs to MKV
+- **Autoplay-default discs** — discs load and begin playing on standalone Blu-ray players with no menu interaction required
+- **Multi-episode projects** — build a full season on a single disc; disc autoplays Episode 1, Title button cycles between episodes; custom titles/labels; project save and load
+- **Full BD-ROM structure** — complete BDMV folder with MPLS playlists, CLPI clip info, valid PMT stream declarations, and AC-3 audio
 - **Trick-play (FF/RW)** — fast-forward and rewind work correctly on autoplayed titles
 - **Custom splash screen** — solid color or custom PNG, duration 3/5/8/10 seconds
 - **Multiple audio tracks** — preserves all dubs, commentary, and language options from source MKV
 - **Resolution enforcement** — honors your selected output resolution (1080p/720p/480p); BD-compliant validation at build time
 - **Stream copy / passthrough** — zero re-encoding for already-BD-compatible sources
 - **ISO output** — mount and play in VLC, IINA, or any BD-capable software player
-- **Light and dark mode**
-
-**New in v1.10.0:**
-- **Interactive episode menu** — BD-ROM IG (Interactive Graphics) menu at disc boot; each episode gets a labeled button; supports 2–9 episodes with auto-centered layout; customizable button labels; text rendered via ffmpeg drawtext with bundled Inter font (SIL OFL)
+- **macOS-native Electron app** — light and dark mode
 
 **Roadmap (not yet in a shipping release):**
 - Complete subtitle pipeline (SRT/ASS/SUP/PGS conversion end-to-end)
@@ -105,9 +105,9 @@ npm start
 
 ## Known Limitations
 
+- **Interactive menus (experimental)** — available behind the **Menus (Beta)** toggle in Project Settings. They render correctly in software players (libbluray/VLC) but do not yet reliably render buttons on standalone hardware Blu-ray players. The **autoplay-default path is the supported production workflow**; leave the Beta toggle off for hardware-bound discs.
 - Trick-play on Title 2+ depends on player firmware; tested on LG BP350
 - Subtitle pipeline is partially wired; for embedded PGS in source MKV it works; SRT/ASS conversion is not yet end-to-end
-- Interactive menus are in development (IG encoder foundation complete with 59 passing tests, not yet wired into builds)
 - No animated disc menus yet
 - Apple Silicon binary only in the pre-built DMG; Intel users must build from source
 
