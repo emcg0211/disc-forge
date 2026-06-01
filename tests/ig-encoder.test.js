@@ -863,15 +863,14 @@ console.log('\n=== 14: ODS DTS decode pipeline + END timing (v1.10.15 hardware t
   const ICS_PTS = 54000000;
   const ICS_DTS = ICS_PTS - 11664;  // 53988336
 
-  // ODS 0: 10×9 = 90 pixels → decode_time = ceil(90/90) = 1
-  // ODS 1: 10×9 = 90 pixels → decode_time = 1
-  // Chain: ODS[0] DTS=ICS_DTS, PTS=ICS_DTS+1; ODS[1] DTS=ICS_DTS+1, PTS=ICS_DTS+2
-  // END.PTS = ICS_DTS+2
-  const ODS_W = 10, ODS_H = 9;  // 90 pixels → decode_time=1 each
+  // Constant decode_time=3 per ODS (v1.10.16: replaces ceil(w*h/90) to stay within LG tolerance).
+  // Chain: ODS[0] DTS=ICS_DTS, PTS=ICS_DTS+3; ODS[1] DTS=ICS_DTS+3, PTS=ICS_DTS+6
+  // END.PTS = ICS_DTS+6
+  const ODS_W = 10, ODS_H = 9;
   const ODS0_DTS = ICS_DTS;
-  const ODS0_PTS = ICS_DTS + 1;
+  const ODS0_PTS = ICS_DTS + 3;
   const ODS1_DTS = ODS0_PTS;
-  const ODS1_PTS = ODS0_PTS + 1;
+  const ODS1_PTS = ODS0_PTS + 3;
   const END_PTS  = ODS1_PTS;
 
   const ds = buildIGDisplaySet({
@@ -942,13 +941,13 @@ console.log('\n=== 14: ODS DTS decode pipeline + END timing (v1.10.15 hardware t
   // ODS[0]: DTS=ICS_DTS, PTS=ICS_DTS+decode_time (v1.10.15 fix)
   assertEq(pesiList[3].segType, 0x15, 'Segment 3 type = ODS (0x15)');
   assertEq(pesiList[3].dts, ODS0_DTS, 'ODS[0] DTS = ICS_DTS (chained pipeline, v1.10.15)');
-  assertEq(pesiList[3].pts, ODS0_PTS, 'ODS[0] PTS = ICS_DTS + ceil(w*h/90) (v1.10.15)');
+  assertEq(pesiList[3].pts, ODS0_PTS, 'ODS[0] PTS = ICS_DTS + 3 (constant decode_time, v1.10.16)');
   assertEq((pesiList[3].flags2 & 0xC0) >> 6, 3, 'ODS[0] flags2 has both PTS+DTS bits (0xC0)');
 
   // ODS[1]: DTS=ODS[0].PTS, PTS=ODS[0].PTS+decode_time (chained)
   assertEq(pesiList[4].segType, 0x15, 'Segment 4 type = ODS (0x15)');
   assertEq(pesiList[4].dts, ODS1_DTS, 'ODS[1] DTS = ODS[0].PTS (chained pipeline, v1.10.15)');
-  assertEq(pesiList[4].pts, ODS1_PTS, 'ODS[1] PTS = ODS[0].PTS + ceil(w*h/90) (v1.10.15)');
+  assertEq(pesiList[4].pts, ODS1_PTS, 'ODS[1] PTS = ODS[0].PTS + 3 (constant decode_time, v1.10.16)');
   assertEq((pesiList[4].flags2 & 0xC0) >> 6, 3, 'ODS[1] flags2 has both PTS+DTS bits (0xC0)');
 
   // END: PTS = last ODS PTS (v1.10.15 fix — was ICS PTS in v1.10.14, which was wrong)
@@ -958,11 +957,12 @@ console.log('\n=== 14: ODS DTS decode pipeline + END timing (v1.10.15 hardware t
   assertEq(endSeg.dts, null,     'END PES has no DTS (flags2=0x80)');
 }
 
-console.log('\n=== 15: ODS decode_time = ceil(w*h/90), verified vs Toast raw bytes ===');
+console.log('\n=== 15: ODS decode_time = 3 (constant) — v1.10.16 LG tolerance fix ===');
 {
-  // Toast hardware reference formula: decode_time = ceil(w*h/90) ticks at 90kHz.
-  // Empirically verified: 22×22→6, 16×16→3, 16×17→4, 79×46→41.
-  // Test that our encoder uses the same formula for a range of sizes.
+  // v1.10.15 used decode_time=ceil(w*h/90). For our 800×90 buttons (800 ticks each), 6 ODS
+  // produced 4800 ticks total overshoot — LG BP350 rejected the disc at load time (white screen).
+  // v1.10.16 fix: constant decode_time=3 (Toast empirical minimum, confirmed: 16×16 ODS → 3 ticks).
+  // 6 ODS × 3 = 18 ticks total overshoot — well inside Toast's empirical max of 41 ticks.
   function getOdsTiming(w, h) {
     const ds = buildIGDisplaySet({
       composition: {
@@ -1003,24 +1003,56 @@ console.log('\n=== 15: ODS decode_time = ceil(w*h/90), verified vs Toast raw byt
     return null;
   }
 
-  const ICS_DTS = 54000000 - 11664;
-  // Toast-verified cases
-  const t22 = getOdsTiming(22, 22);  // 484 px → ceil(484/90)=6
-  assertEq(t22.dts, ICS_DTS, '22×22 ODS DTS = ICS_DTS');
-  assertEq(t22.decodeTime, 6, '22×22 decode_time = ceil(484/90) = 6 (matches Toast)');
+  // Constant 3 regardless of image size
+  assertEq(getOdsTiming(16, 16).decodeTime, 3, 'decode_time=3 for 16×16 (constant, v1.10.16)');
+  assertEq(getOdsTiming(22, 22).decodeTime, 3, 'decode_time=3 for 22×22 (constant, v1.10.16)');
+  assertEq(getOdsTiming(800, 90).decodeTime, 3, 'decode_time=3 for 800×90 (our buttons, v1.10.16)');
+  assertEq(getOdsTiming(1, 1).decodeTime,    3, 'decode_time=3 for 1×1 (constant, v1.10.16)');
 
-  const t16_16 = getOdsTiming(16, 16);  // 256 px → ceil(256/90)=3
-  assertEq(t16_16.decodeTime, 3, '16×16 decode_time = ceil(256/90) = 3 (matches Toast)');
-
-  const t16_17 = getOdsTiming(16, 17);  // 272 px → ceil(272/90)=4
-  assertEq(t16_17.decodeTime, 4, '16×17 decode_time = ceil(272/90) = 4 (matches Toast)');
-
-  const t79_46 = getOdsTiming(79, 46);  // 3634 px → ceil(3634/90)=41
-  assertEq(t79_46.decodeTime, 41, '79×46 decode_time = ceil(3634/90) = 41 (matches Toast)');
-
-  // Minimum: 1×1 = 1 px → ceil(1/90) rounds to 0 but clamped to 1
-  const t1_1 = getOdsTiming(1, 1);
-  assertEq(t1_1.decodeTime, 1, '1×1 decode_time clamped to minimum 1');
+  // 6-ODS scenario (our actual button count): total overshoot = 18 ticks < Toast max 41
+  const ICS_PTS = 54000000;
+  const ICS_DTS = ICS_PTS - 11664;
+  const ds6 = buildIGDisplaySet({
+    composition: {
+      videoWidth: 1920, videoHeight: 1080, frameRate: 0x40,
+      compositionNumber: 0, compositionState: 2,
+      streamModel: false, uiModel: false,
+      compositionTimeoutPts: 0, selectionTimeoutPts: 0, userTimeoutMs: 0,
+      pages: [{ id: 0, version: 0, uoMask: Buffer.alloc(8),
+        animationFrameRateCode: 0, defaultSelectedButtonIdRef: 0,
+        defaultActivatedButtonIdRef: 0xFFFF, paletteIdRef: 0, bogs: [] }],
+    },
+    palette: { paletteId: 0, version: 0, entries: [] },
+    windows: [],
+    objects: Array.from({ length: 6 }, (_, i) => ({ objectId: i, version: 0, width: 800, height: 90, pixels: new Uint8Array(800 * 90).fill(0) })),
+    pid: 0x1400, pts: ICS_PTS,
+  });
+  function decodePts6(b) {
+    return ((b[0] & 0x0E) << 29) | (b[1] << 22) | ((b[2] & 0xFE) << 14) | (b[3] << 7) | ((b[4] & 0xFE) >> 1);
+  }
+  const pesiList6 = [];
+  let off6 = 0;
+  while (off6 + 188 <= ds6.length) {
+    const pkt6 = ds6.slice(off6, off6 + 188);
+    if (pkt6[0] !== 0x47 || !(pkt6[1] & 0x40)) { off6 += 188; continue; }
+    const hasAdapt6 = (pkt6[3] & 0x20) !== 0;
+    const ps6 = hasAdapt6 ? (4 + 1 + pkt6[4]) : 4;
+    const pes6 = pkt6.slice(ps6);
+    if (pes6[0] !== 0 || pes6[1] !== 0 || pes6[2] !== 1) { off6 += 188; continue; }
+    const flags2_6 = pes6[7]; const hasDts6 = (flags2_6 & 0x40) !== 0;
+    const ptsVal6 = decodePts6(pes6.slice(9, 14));
+    const dtsVal6 = hasDts6 ? decodePts6(pes6.slice(14, 19)) : null;
+    const payOff6 = 9 + pes6[8];
+    const segType6 = payOff6 < pes6.length ? pes6[payOff6] : null;
+    pesiList6.push({ segType: segType6, pts: ptsVal6, dts: dtsVal6 });
+    off6 += 188;
+  }
+  const odsList6 = pesiList6.filter(p => p.segType === 0x15);
+  assertEq(odsList6.length, 6, '6-ODS display set has 6 ODS segments (v1.10.16)');
+  assertEq(odsList6[5].dts, ICS_DTS + 15, 'ODS[5] DTS = ICS_DTS+15 (6×3 chain, v1.10.16)');
+  assertEq(odsList6[5].pts, ICS_DTS + 18, 'ODS[5] PTS = ICS_DTS+18 (max overshoot=18, v1.10.16)');
+  const endSeg6 = pesiList6[pesiList6.length - 1];
+  assertEq(endSeg6.pts, ICS_DTS + 18, 'END.PTS = ICS_DTS+18 for 6 ODS (v1.10.16, inside Toast max 41)');
 }
 
 // ─── Summary ──────────────────────────────────────────────────────────────────

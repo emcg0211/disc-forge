@@ -636,21 +636,18 @@ function buildIGDisplaySet({ composition, palette, windows, objects, pid, pts })
   // ics_dts = decode deadline = ics_pts − 11664 ticks (≈130ms, 4 frames at 29.97fps).
   const icsDts = Math.max(0, (pts || 0) - 11664);
 
-  // ODS decode pipeline (v1.10.15 fix, confirmed from Toast hardware reference):
-  //   Toast (confirmed on LG BP350): each ODS has DTS+PTS (flags2=0xC0).
-  //   ODS[0].DTS = ICS.DTS; ODS[i].DTS = ODS[i-1].PTS (chained).
-  //   ODS[i].PTS = ODS[i].DTS + ceil(w*h/90) — the BD T-STD object decode time at 90kHz.
-  //   The formula ceil(w*h/90) was empirically verified against Toast's raw bytes:
-  //     22×22=484 → ceil(484/90)=6 ✓; 16×16=256 → 3 ✓; 16×17=272 → 4 ✓; 79×46=3634 → 41 ✓
-  //   END.PTS = last ODS PTS (not ICS PTS). Toast: END.PTS−last_ODS.PTS=0, confirmed.
-  //   ICS: PTS=ics_pts, DTS=ics_dts.  PDS/WDS: PTS=ics_dts, no DTS.
+  // ODS decode pipeline (v1.10.15 fix, v1.10.16 refinement):
+  //   Each ODS has DTS+PTS (flags2=0xC0), chained: ODS[0].DTS=ICS.DTS, ODS[i].DTS=ODS[i-1].PTS.
+  //   v1.10.15 used decode_time=ceil(w*h/90); for our 800×90 buttons (800 ticks each), 6 ODS
+  //   produced 4800 ticks total overshoot — LG BP350 rejected the disc at load time (white screen).
+  //   v1.10.16: constant decode_time=3 (Toast's empirical minimum; 16×16 ODS → 3 ticks confirmed).
+  //   6 ODS × 3 = 18 ticks total overshoot — well inside Toast's empirical max of 41 ticks.
+  //   END.PTS = last ODS PTS. ICS: PTS=ics_pts, DTS=ics_dts. PDS/WDS: PTS=ics_dts, no DTS.
+  const ODS_DECODE_TIME = 3;  // Toast empirical minimum; keeps all ODS.PTS within LG's tolerance window
   let decodeClock = icsDts;
-  const odsTimings = ods.map(seg => {
-    const w = seg.readUInt16BE(10);
-    const h = seg.readUInt16BE(12);
-    const decodeTime = Math.max(1, Math.ceil(w * h / 90));
+  const odsTimings = ods.map(() => {
     const odsDts = decodeClock;
-    const odsPts = decodeClock + decodeTime;
+    const odsPts = decodeClock + ODS_DECODE_TIME;
     decodeClock = odsPts;
     return { pts: odsPts, dts: odsDts };
   });

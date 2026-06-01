@@ -1,5 +1,44 @@
 # Changelog
 
+## v1.10.16 — 2026-05-31
+
+**Hardware IG fix — constant ODS decode_time=3 (LG white-screen regression from v1.10.15)**
+
+v1.10.15 introduced the correct DTS chaining structure but used `decode_time = ceil(w×h/90)`,
+which produced 800 ticks per ODS for our 800×90 buttons. With 6 ODS, total ODS.PTS overshoot
+above ICS.DTS was 4800 ticks (53ms) — LG BP350 rejected the disc at load time (white screen).
+
+### Root cause
+
+LG BP350 enforces a hardware tolerance for how far ODS.PTS may overshoot ICS.DTS. Toast's
+confirmed-working discs use tiny decode_times (3–41 ticks). Our formula produced 800 ticks per
+ODS because our buttons are large (800×90 px = 72,000 pixels → ceil(72000/90) = 800).
+
+### Fix
+
+`buildIGDisplaySet` in `src/lib/ig-encoder.js`:
+
+Replaced `decode_time = Math.max(1, Math.ceil(w * h / 90))` with constant `decode_time = 3`:
+
+- `3` is Toast's empirical minimum (confirmed: 16×16 ODS uses decode_time=3)
+- For 6 ODS: total overshoot = 18 ticks — well inside Toast's empirical max of 41 ticks
+- DTS chaining pipeline structure unchanged from v1.10.15:
+  - `ODS[0].DTS = ICS.DTS`
+  - `ODS[i].DTS = ODS[i-1].PTS` (chained)
+  - `ODS[i].PTS = ODS[i].DTS + 3` (constant, not size-dependent)
+  - `END.PTS = ODS[last].PTS = ICS.DTS + 3 × N`
+
+### Verification
+
+| Metric | Toast (empirical) | v1.10.15 | v1.10.16 |
+|--------|-------------------|----------|----------|
+| decode_time per ODS | 3–41 ticks | 800 ticks ✗ | **3 ticks ✓** |
+| Total overshoot (6 ODS) | ≤ 41 ticks | 4800 ticks ✗ | **18 ticks ✓** |
+| LG BP350 result | ✓ buttons | ✗ white screen | TBD (ISO ready) |
+
+Tests: 151 passed (ig-encoder.test.js) + 24 passed (rewrite-video-pes-dts.test.js) = 175 total.
+ISO: `~/Desktop/v11016_test.iso`
+
 ## v1.10.15 — 2026-05-22
 
 **Hardware IG fix — ODS DTS decode pipeline + END timing (confirmed vs Toast hardware reference)**
