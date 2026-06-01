@@ -89,20 +89,13 @@ function encodePTS(pts, withDts = false) {
 
 /**
  * Write a 90kHz DTS value as a 5-byte PES DTS field.
- *
- * The MPEG-2 spec prescribes a leading marker nibble of '0001' for a DTS field
- * that accompanies a PTS (byte[0] high nibble = 0x1). Some commercial BD-ROM
- * authoring pipelines instead emit '0000' (byte[0] high nibble = 0x0) for IG
- * DTS fields, and standalone hardware players accept it. `markerHigh` selects
- * the leading nibble: 0x1 (spec default) or 0x0 (observed BD-ROM IG convention).
- *
- * @param {number} dts        - DTS in 90kHz ticks
- * @param {number} markerHigh - leading nibble (0x1 spec default, 0x0 BD-ROM IG)
+ * DTS marker nibble = 0x11 ('0001').
+ * @param {number} dts - DTS in 90kHz ticks
  * @returns {Buffer} 5 bytes
  */
-function encodeDTS(dts, markerHigh = 0x1) {
+function encodeDTS(dts) {
   const buf = Buffer.alloc(5);
-  buf[0] = ((markerHigh & 0x0F) << 4) | 0x01 | (((dts >> 30) & 0x07) << 1);
+  buf[0] = 0x11 | (((dts >> 30) & 0x07) << 1);
   buf[1] = (dts >> 22) & 0xFF;
   buf[2] = ((dts >> 15) & 0x7F) << 1 | 1;
   buf[3] = (dts >> 7) & 0xFF;
@@ -556,13 +549,12 @@ function buildNavCmd(type, arg = 0) {
  * @param {number}      pts         - presentation timestamp (90kHz)
  * @param {number}      startCC     - continuity counter starting value
  * @param {number|null} dts         - decode timestamp (90kHz); null = PTS-only PES
- * @param {number}      dtsMarker   - DTS leading nibble (0x1 spec, 0x0 BD-ROM IG convention)
  * @returns {Buffer} TS-packetized PES
  */
-function wrapInPES(segmentData, pid = 0x1200, pts = 0, startCC = 0, dts = null, dtsMarker = 0x1) {
+function wrapInPES(segmentData, pid = 0x1200, pts = 0, startCC = 0, dts = null) {
   const hasDts   = dts !== null && dts !== undefined;
   const ptsBuf   = encodePTS(pts, hasDts);
-  const dtsBuf   = hasDts ? encodeDTS(dts, dtsMarker) : Buffer.alloc(0);
+  const dtsBuf   = hasDts ? encodeDTS(dts) : Buffer.alloc(0);
   const hdrDataLen = ptsBuf.length + dtsBuf.length; // 5 (PTS-only) or 10 (PTS+DTS)
 
   // PES_packet_length = bytes after the 6-byte PES start (stream_id+length = 3+2+1 = 6)
@@ -625,26 +617,12 @@ function wrapInPES(segmentData, pid = 0x1200, pts = 0, startCC = 0, dts = null, 
  * @param {Array}  opts.objects      - Array of ODS options (each passed to encodeODS)
  * @param {number} opts.pid          - IG stream PID
  * @param {number} opts.pts          - PTS timestamp
- * @param {number} opts.icsDtsLead   - ICS PTS−DTS lead in 90kHz ticks (default 11664;
- *                                      BD-ROM IG convention observed in commercial tools = 12012)
- * @param {string} opts.odsDecodeMode - 'constant' (legacy: 3 ticks/object) or
- *                                      'area' (ceil(w·h/90) per object — observed BD-ROM convention)
- * @param {number} opts.dtsMarker    - DTS leading nibble (0x1 spec, 0x0 BD-ROM IG convention)
- * @param {number} opts.startCC      - starting continuity counter (for chaining display sets)
  * @returns {Buffer}
- *
- * WDS handling: a Window Definition Segment is emitted only when `windows` is a
- * non-empty array. Commercial BD-ROM IG menus are commonly authored with NO WDS
- * (button positions + object sizes fully define the rendered regions), so passing
- * `null`/`[]` produces the WDS-free segment order ICS → PDS → ODS… → END.
  */
-function buildIGDisplaySet({ composition, palette, windows, objects, pid, pts,
-                             icsDtsLead = 11664, odsDecodeMode = 'constant',
-                             dtsMarker = 0x1, startCC = 0 }) {
+function buildIGDisplaySet({ composition, palette, windows, objects, pid, pts }) {
   const ics  = encodeICS(composition || {});
   const pds  = encodePDS(palette     || {});
-  const hasWds = Array.isArray(windows) && windows.length > 0;
-  const wds  = hasWds ? encodeWDS(windows) : null;
+  const wds  = encodeWDS(windows     || []);
   const ods  = (objects || []).map(o => encodeODS(o));
   const end  = encodeEND();
 
@@ -655,37 +633,31 @@ function buildIGDisplaySet({ composition, palette, windows, objects, pid, pts,
   // s->complete stays 0, and GC_CTRL_INIT_MENU is never called.
   // CC must be continuous across all PES packets for the same PID.
   //
-  // ics_dts = decode deadline = ics_pts − icsDtsLead ticks.
-  // Legacy default 11664; the BD-ROM IG convention observed in commercial authoring
-  // tools is 12012 (= 4 × 3003, the per-display-set decode lead those tools emit).
-  const icsDts = Math.max(0, (pts || 0) - icsDtsLead);
+  // ics_dts = decode deadline = ics_pts − 11664 ticks (≈130ms, 4 frames at 29.97fps).
+  const icsDts = Math.max(0, (pts || 0) - 11664);
 
-  // ODS decode pipeline. Each ODS has DTS+PTS (flags2=0xC0), chained:
-  //   ODS[0].DTS = ICS.DTS,  ODS[i].DTS = ODS[i-1].PTS,  ODS[i].PTS = ODS[i].DTS + decode_time.
-  //   decode_time is either a constant (legacy 'constant' mode) or ceil(w·h/90)
-  //   ('area' mode — the object-transfer budget observed across commercial BD-ROM IG
-  //   discs: 22×22→6, 16×16→3, 16×17→4, 79×46→41 ticks). END.PTS = last ODS PTS.
-  //   ICS: PTS=ics_pts, DTS=ics_dts. PDS/WDS: PTS=ics_dts, no DTS.
-  const ODS_DECODE_TIME = 3;  // legacy constant-mode budget
+  // ODS decode pipeline (v1.10.15 fix, v1.10.16 refinement):
+  //   Each ODS has DTS+PTS (flags2=0xC0), chained: ODS[0].DTS=ICS.DTS, ODS[i].DTS=ODS[i-1].PTS.
+  //   v1.10.15 used decode_time=ceil(w*h/90); for our 800×90 buttons (800 ticks each), 6 ODS
+  //   produced 4800 ticks total overshoot — LG BP350 rejected the disc at load time (white screen).
+  //   v1.10.16: constant decode_time=3 (Toast's empirical minimum; 16×16 ODS → 3 ticks confirmed).
+  //   6 ODS × 3 = 18 ticks total overshoot — well inside Toast's empirical max of 41 ticks.
+  //   END.PTS = last ODS PTS. ICS: PTS=ics_pts, DTS=ics_dts. PDS/WDS: PTS=ics_dts, no DTS.
+  const ODS_DECODE_TIME = 3;  // Toast empirical minimum; keeps all ODS.PTS within LG's tolerance window
   let decodeClock = icsDts;
-  const odsTimings = ods.map((_, i) => {
-    const obj = (objects || [])[i] || {};
-    const decodeTime = odsDecodeMode === 'area'
-      ? Math.max(1, Math.ceil(((obj.width || 0) * (obj.height || 0)) / 90))
-      : ODS_DECODE_TIME;
+  const odsTimings = ods.map(() => {
     const odsDts = decodeClock;
-    const odsPts = decodeClock + decodeTime;
+    const odsPts = decodeClock + ODS_DECODE_TIME;
     decodeClock = odsPts;
     return { pts: odsPts, dts: odsDts };
   });
   const endPts = decodeClock;  // last ODS PTS, or icsDts if there are no ODS
 
-  // Build segments in order: ICS, PDS, [WDS], ODS[0..n], END.
-  // WDS is present only when windows were supplied (see hasWds above).
-  const segments = hasWds ? [ics, pds, wds, ...ods, end] : [ics, pds, ...ods, end];
-  const odsStartIdx = hasWds ? 3 : 2;  // first ODS index in segments array
+  // Build segments in order: ICS(0), PDS(1), WDS(2), ODS[0..n](3..n+2), END(n+3)
+  const segments = [ics, pds, wds, ...ods, end];
+  const odsStartIdx = 3;  // first ODS index in segments array
   const lastIdx = segments.length - 1;
-  let cc = startCC & 0x0F;
+  let cc = 0;
   const pesPackets = segments.map((seg, idx) => {
     let segPts, segDts;
     if (idx === 0) {
@@ -707,7 +679,7 @@ function buildIGDisplaySet({ composition, palette, windows, objects, pid, pts,
       segDts = null;
     }
     const pesHdrSize = (segDts !== null && segDts !== undefined) ? 19 : 14;
-    const pkt = wrapInPES(seg, pid, segPts, cc, segDts, dtsMarker);
+    const pkt = wrapInPES(seg, pid, segPts, cc, segDts);
     cc = (cc + Math.ceil((pesHdrSize + seg.length) / 184)) & 0x0F;
     return pkt;
   });

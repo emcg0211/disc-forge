@@ -11,31 +11,15 @@
  *     → renderButtonBitmap(text,state) or renderButtonPixels(state)
  *     → ig-encoder.buildIGDisplaySet() assembles the full BD IG display set
  *
- * BD-ROM IG conventions (v1.10.18 structural model)
- * --------------------------------------------------
- * This emitter follows the IG structural conventions observed across commercial
- * BD-ROM authoring tools (documented in docs/v11018_toast_template_spec.md), which
- * standalone hardware players (e.g. LG BP350) reliably render where the prior
- * "always-visible buttons" model did not:
- *   - normal_state object = 0xFFFF (invisible): a button shows nothing until selected.
- *   - ONE object per button, used for both the selected and activated state.
- *   - page.default_selected_button_id_ref = 0xFFFF (no default selection): the menu
- *     opens to a bare background; the first arrow-key press selects the nearest button.
- *   - NO WDS segment (button positions + object sizes define the rendered regions).
- *   - non-wrapping neighbor navigation with self-referencing ends; left/right mirror up/down.
- *   - ODS decode budget = ceil(w·h/90) per object, chained; ICS PTS−DTS lead = 12012.
- *   - DTS leading nibble 0x0 on IG PES.
- *   - TWO epoch_start display sets per menu (composition_number 0 and 1), re-asserting
- *     the composition; continuity counter runs continuously across both.
- *
  * Palette:
  *   0 = transparent (background video shows through)
  *   1 = white (text + border)
  *   2 = orange (selected button fill, YCbCr → RGB ≈ 201,100,0)
- *   3 = dark slate blue (unused under the invisible-normal model; kept for palette compat)
+ *   3 = dark slate blue (normal button fill, YCbCr → RGB ≈ 0,37,120)
  *
  * Button layout (auto-centered, 800×90 each, 30px gap):
- *   Button i → object i (selected/activated bitmap) → numeric id i+1 → PLAY_PL(playlist[i]).
+ *   Button i (obj i*3/i*3+1/i*3+2): Episode i+1 → PLAY_PL(i+1)
+ *   Single WDS window covers all buttons (BD spec: max 2 windows per page).
  */
 
 const path = require('path');
@@ -60,11 +44,6 @@ const BTN_W   = 800;
 const BTN_H   = 90;
 const BTN_GAP = 30;  // vertical gap between buttons
 const BORDER  = 3;   // border thickness in pixels
-
-// ── BD-ROM IG structural constants (observed across commercial authoring tools) ──
-// See docs/v11018_toast_template_spec.md for the byte-level derivation.
-const ICS_DTS_LEAD = 12012;  // ICS PTS−DTS lead in 90kHz ticks (= 4 × 3003)
-const DS_GAP       = 45045;  // inter-display-set PTS spacing (= 15 × 3003)
 
 // ── Text rendering constants ──────────────────────────────────────────────────
 // Font for drawtext (SIL Open Font License — Inter Regular).
@@ -187,7 +166,9 @@ function renderButtonPixels(w, h, state) {
 /**
  * Build the complete IG display set for an N-button menu.
  * Buttons are auto-laid out and centered vertically on the frame.
- * Object IDs: i*3+0 = normal, i*3+1 = selected, i*3+2 = activated for button i.
+ * State model (v1.10.19): object_id i = the one (selected/highlighted) bitmap for
+ * button i; normal_state is invisible (object_id_ref=0xFFFF) and activated_state
+ * reuses the selected bitmap.
  *
  * @param {object}   opts
  * @param {number}   opts.videoWidth   - video frame width (default 1920)
@@ -210,93 +191,76 @@ function buildMenuDisplaySet({ videoWidth = 1920, videoHeight = 1080, playlists 
   const btnX   = Math.round((videoWidth  - BTN_W)  / 2);
   const btnY   = Array.from({ length: N }, (_, i) => topY + i * (BTN_H + BTN_GAP));
 
-  // ONE bitmap per button: the visible (selected/activated) appearance. Under the
-  // invisible-normal-state model the normal state draws nothing, so a single
-  // highlighted bitmap per button is all that's needed.
+  // Button state model (v1.10.19 isolation change vs v1.10.17 baseline):
+  // emit ONE bitmap per button — the 'selected' (highlighted) state — and make
+  // normal_state invisible (object_id_ref=0xFFFF). selected_state and
+  // activated_state both reference that single bitmap. This isolates the one
+  // untested-in-isolation hypothesis from v1.10.18's 8 simultaneous changes
+  // (every other byte stays at v1.10.17 values).
   const bitmaps = playlistIds.map((_, i) => {
     const label = (labels[i] && labels[i].trim()) ? labels[i].trim() : `Play Episode ${i + 1}`;
     return renderButtonBitmap(label, 'selected', BTN_W, BTN_H, ffmpegPath);
   });
 
-  // One BOG per button. Button IDs 1-based (BD spec: valid range [1, 0xEFFF]).
-  // Object id (i) is the button's single bitmap, used for BOTH selected and
-  // activated state. Normal state = 0xFFFF (invisible). Navigation is
-  // non-wrapping with self-referencing ends; left/right mirror up/down so both
-  // axes traverse the vertical list.
-  const bogs = playlistIds.map((pl, i) => {
-    const k     = i + 1;                  // 1-based button id
-    const upper = Math.max(1, k - 1);     // self-reference at the top
-    const lower = Math.min(N, k + 1);     // self-reference at the bottom
-    return {
-      defaultValidButtonIdRef: k,
-      buttons: [{
-        id:                 k,
-        numericSelectValue: k,
-        autoActionFlag:     false,
-        x:                  btnX,
-        y:                  btnY[i],
-        upperBtnId:         upper,
-        lowerBtnId:         lower,
-        leftBtnId:          upper,
-        rightBtnId:         lower,
-        normalStartObjId:   0xFFFF, normalEndObjId: 0xFFFF, normalRepeat: false,
-        selectedSoundId:    0xFF,
-        selStartObjId:      i,     selEndObjId: i,     selRepeat: false,
-        activatedSoundId:   0xFF,
-        actStartObjId:      i,     actEndObjId: i,
-        navCmds: [buildNavCmd('PLAY_PL', pl)],
-      }],
-    };
-  });
-
-  // ODS objects: ONE per button (object id = button index).
-  const objects = playlistIds.map((_, i) => ({
-    objectId: i, version: 0, width: BTN_W, height: BTN_H, pixels: bitmaps[i],
+  // One BOG per button, circular up/down navigation.
+  // Button IDs are 1-based per BD spec (valid range [1, 0xEFFF]; 0 is reserved).
+  const bogs = playlistIds.map((pl, i) => ({
+    defaultValidButtonIdRef: i + 1,
+    buttons: [{
+      id:                 i + 1,
+      numericSelectValue: i + 1,
+      autoActionFlag:     false,
+      x:                  btnX,
+      y:                  btnY[i],
+      upperBtnId:         ((i - 1 + N) % N) + 1,
+      lowerBtnId:         ((i + 1) % N) + 1,
+      leftBtnId:          i + 1,
+      rightBtnId:         i + 1,
+      // normal_state invisible — no object until the button is selected.
+      normalStartObjId:   0xFFFF,  normalEndObjId: 0xFFFF,  normalRepeat: false,
+      selectedSoundId:    0xFF,
+      // selected and activated share the single bitmap (objectId = i).
+      selStartObjId:      i,  selEndObjId: i,  selRepeat: false,
+      activatedSoundId:   0xFF,
+      actStartObjId:      i,  actEndObjId: i,
+      navCmds: [buildNavCmd('PLAY_PL', pl)],
+    }],
   }));
 
-  // Page factory — identical content for both display sets (only composition_number differs).
-  const makePage = () => ({
-    id: 0, version: 0,
-    uoMask: Buffer.alloc(8),
-    animationFrameRateCode:      0,
-    defaultSelectedButtonIdRef:  0xFFFF,  // no default selection (revealed on first arrow press)
-    defaultActivatedButtonIdRef: 0xFFFF,
-    paletteIdRef: 0,
-    bogs,
-  });
+  // ODS objects: one per button (the selected/highlighted bitmap), objectId 0..N-1.
+  const objects = [];
+  for (let i = 0; i < N; i++) {
+    objects.push({ objectId: i, version: 0, width: BTN_W, height: BTN_H, pixels: bitmaps[i] });
+  }
 
-  // Build one epoch_start display set. WDS omitted (windows: null). decode budget
-  // and timing follow the observed BD-ROM IG conventions.
-  const buildDS = (compositionNumber, dsPts, startCC) => buildIGDisplaySet({
+  return buildIGDisplaySet({
     composition: {
       videoWidth, videoHeight,
-      frameRate:        0x20,   // 24fps (frame_rate_code=2)
-      compositionNumber,
+      frameRate:        0x20,   // 24fps (frame_rate_code=2; 0x40 would be 29.97fps)
+      compositionNumber: 0,
       compositionState:  2,     // epoch_start
-      streamModel:       false, // Multiplexed (IG in the same m2ts clip as video)
-      // composition_timeout_pts=0 is the universal 'no timeout' convention.
+      streamModel:       false, // Multiplexed (stream_model=0): IG is in the same m2ts clip as video
+      // composition_timeout_pts=0 is the universal 'no timeout' convention; setting to video PTS in v1.10.8 caused hardware to reject the disc at load time, likely because the composition appears 'expired' immediately.
       uiModel:           false,
       userTimeoutMs:     0,
-      pages: [makePage()],
+      pages: [{
+        id: 0, version: 0,
+        uoMask: Buffer.alloc(8),
+        animationFrameRateCode:      0,
+        defaultSelectedButtonIdRef:  0xFFFF,  // no default selection: first arrow press reveals nearest button
+        defaultActivatedButtonIdRef: 0xFFFF,
+        paletteIdRef: 0,
+        bogs,
+      }],
     },
     palette: { paletteId: 0, version: 0, entries: PALETTE },
-    windows: null,             // no WDS segment
+    // Single window spanning all buttons (BD spec allows max 2 windows per page;
+    // one large window covering all buttons is the simplest valid choice for N≥3).
+    windows: [{ id: 0, x: btnX, y: topY, width: BTN_W, height: totalH }],
     objects,
     pid: IG_PID,
-    pts:           dsPts,
-    icsDtsLead:    ICS_DTS_LEAD,  // 12012
-    odsDecodeMode: 'area',        // ceil(w·h/90) per object, chained
-    dtsMarker:     0x0,           // IG DTS leading nibble
-    startCC,
+    pts,
   });
-
-  // TWO epoch_start display sets (composition_number 0 then 1). DS2 re-asserts the
-  // composition DS_GAP ticks later; the continuity counter runs continuously across
-  // both so the demuxer sees no discontinuity.
-  const ds1 = buildDS(0, pts, 0);
-  const cc2 = (ds1.length / 188) & 0x0F;
-  const ds2 = buildDS(1, pts + DS_GAP, cc2);
-  return Buffer.concat([ds1, ds2]);
 }
 
 /**
